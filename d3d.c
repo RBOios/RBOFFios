@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#include <sys/qos.h>
+#endif
 
 extern int g_cur_idx;
 
@@ -28,6 +32,7 @@ static const Fmt *fmt_of(Surf*s){
     f->rb=bits_of(f->rm); f->gb=bits_of(f->gm); f->bb=bits_of(f->bm); f->ab=bits_of(f->am); return f;
 }
 static inline uint32_t c8(uint32_t px,uint32_t m,int sh,int n){ if(!m) return 255; uint32_t v=(px&m)>>sh; return n>=8? v>>(n-8) : (v*255)/((1u<<n)-1); }
+static inline uint32_t to_argb_f(const Fmt *f,uint32_t px){ return (c8(px,f->am,f->as,f->ab)<<24)|(c8(px,f->rm,f->rs,f->rb)<<16)|(c8(px,f->gm,f->gs,f->gb)<<8)|c8(px,f->bm,f->bs,f->bb); }
 static uint32_t to_argb(Surf*s,uint32_t px){ const Fmt *f=fmt_of(s); return (c8(px,f->am,f->as,f->ab)<<24)|(c8(px,f->rm,f->rs,f->rb)<<16)|(c8(px,f->gm,f->gs,f->gb)<<8)|c8(px,f->bm,f->bs,f->bb); }
 static inline uint32_t pc(uint32_t v8,uint32_t m,int sh,int n){ if(!m) return 0; return ((n>=8? v8<<(n-8) : v8>>(8-n))<<sh)&m; }
 static uint32_t from_argb(Surf*s,uint32_t a){ const Fmt *f=fmt_of(s); return pc(a>>24,f->am,f->as,f->ab)|pc((a>>16)&255,f->rm,f->rs,f->rb)|pc((a>>8)&255,f->gm,f->gs,f->gb)|pc(a&255,f->bm,f->bs,f->bb); }
@@ -99,6 +104,7 @@ static void rc_setup(Surf *rt){
     }
 }
 static inline int wrapc(int i,int n,int mask,int addr){
+    if((unsigned)i<(unsigned)n) return i;
     if(addr==3){ return i<0?0:(i>=n?n-1:i); }
     if(addr==2){ int p=((i%(2*n))+2*n)%(2*n); return p<n?p:2*n-1-p; }
     return mask>=0 ? (i&mask) : (((i%n)+n)%n);
@@ -113,6 +119,16 @@ static inline uint32_t tsample(float u,float v,int *kill){
         return tfetch(x,y,kill);
     }
     fx-=0.5f; fy-=0.5f; int x0=(int)floorf(fx), y0=(int)floorf(fy); float ax=fx-x0, ay=fy-y0;
+    if(ax==0.0f&&ay==0.0f){
+        int xa=wrapc(x0,rc.tw,rc.tmask_w,rc.addr), ya=wrapc(y0,rc.th,rc.tmask_h,rc.addr); int k0=0; uint32_t c0=tfetch(xa,ya,&k0);
+        if(rc.use_key){
+            int kc=k0; int xb=wrapc(x0+1,rc.tw,rc.tmask_w,rc.addr), yb=wrapc(y0+1,rc.th,rc.tmask_h,rc.addr);
+            int k1=0,k2=0,k3=0; tfetch(xb,ya,&k1); tfetch(xa,yb,&k2); tfetch(xb,yb,&k3); kc+=k1+k2+k3;
+            if(kc==4) *kill=1;
+            if(k0) return 0;
+        }
+        return c0;
+    }
     int xs[2]={wrapc(x0,rc.tw,rc.tmask_w,rc.addr),wrapc(x0+1,rc.tw,rc.tmask_w,rc.addr)}, ys[2]={wrapc(y0,rc.th,rc.tmask_h,rc.addr),wrapc(y0+1,rc.th,rc.tmask_h,rc.addr)};
     int kk=0, kc=0; uint32_t c[4]; int idx=0;
     for(int j=0;j<2;j++) for(int i=0;i<2;i++){ int k=0; c[idx]=tfetch(xs[i],ys[j],&k); if(k){ kc++; c[idx]=0; } idx++; }
@@ -152,7 +168,7 @@ static inline void shade_px(int x,int y,uint32_t diff,float u,float v){
     Surf *rt=rc.rt; uint8_t *p=gmem+rt->pix+y*rt->pitch+x*(rt->bpp/8);
     uint32_t out=col;
     if(rc.blend){
-        uint32_t dst = rc.rbpp==16 ? rc.exp16[*(uint16_t*)p] : to_argb(rt,*(uint32_t*)p);
+        uint32_t dst = rc.rbpp==16 ? rc.exp16[*(uint16_t*)p] : to_argb_f(rc.rf,*(uint32_t*)p);
         int sf=rc.sf, df=rc.df; uint32_t r=col&0xFF000000u;
         if(sf==5&&df==6){ uint32_t sa=col>>24, ia=255-sa;
             for(int ch=0;ch<3;ch++){ uint32_t s=(col>>(ch*8))&255, d=(dst>>(ch*8))&255; uint32_t val=mul8(s,sa)+mul8(d,ia); if(val>255)val=255; r|=val<<(ch*8); } }
@@ -164,34 +180,83 @@ static inline void shade_px(int x,int y,uint32_t diff,float u,float v){
 }
 static inline float edge(float ax,float ay,float bx,float by,float px,float py){ return (bx-ax)*(py-ay)-(by-ay)*(px-ax); }
 static int is_tl(float ax,float ay,float bx,float by){ float dx=bx-ax, dy=by-ay; return (dy==0&&dx>0)||dy<0; }
-static void raster_tri(Surf*rt,Vtx a,Vtx b,Vtx c){
-    float area=edge(a.x,a.y,b.x,b.y,c.x,c.y); if(area==0) return;
-    int cull=D.rs[22]; if(cull==3&&area<0) return; if(cull==2&&area>0) return;
+typedef struct { Vtx a,b,c; float inv,dw0,dw1,dw2; int x0,x1,y0,y1,tl0,tl1,tl2,flat; } TriSetup;
+static TriSetup *tris=NULL; static size_t tris_cap=0, ntris=0;
+static int tri_setup(Surf*rt,Vtx a,Vtx b,Vtx c){
+    float area=edge(a.x,a.y,b.x,b.y,c.x,c.y); if(area==0) return 0;
+    int cull=D.rs[22]; if(cull==3&&area<0) return 0; if(cull==2&&area>0) return 0;
     if(area<0){ Vtx t=b; b=c; c=t; area=-area; }
     float minx=fminf(a.x,fminf(b.x,c.x)), maxx=fmaxf(a.x,fmaxf(b.x,c.x)), miny=fminf(a.y,fminf(b.y,c.y)), maxy=fmaxf(a.y,fmaxf(b.y,c.y));
-    int x0=(int)floorf(minx), x1=(int)ceilf(maxx), y0=(int)floorf(miny), y1=(int)ceilf(maxy);
     int cx0=D.vpx, cy0=D.vpy, cx1=D.vpx+D.vpw, cy1=D.vpy+D.vph;
     if(cx1>rt->w)cx1=rt->w; if(cy1>rt->h)cy1=rt->h; if(cx0<0)cx0=0; if(cy0<0)cy0=0;
-    if(x0<cx0)x0=cx0; if(y0<cy0)y0=cy0; if(x1>cx1)x1=cx1; if(y1>cy1)y1=cy1;
-    int tl0=is_tl(b.x,b.y,c.x,c.y), tl1=is_tl(c.x,c.y,a.x,a.y), tl2=is_tl(a.x,a.y,b.x,b.y);
-    float inv=1.0f/area;
-    /* per-row incremental edge functions */
-    float dw0=-(c.y-b.y), dw1=-(a.y-c.y), dw2=-(b.y-a.y);   /* d/dx of edge(...,px,py): -(by-ay) */
-    int flat=(a.col==b.col&&b.col==c.col);
+    if(!(maxx>=(float)cx0&&minx<=(float)cx1&&maxy>=(float)cy0&&miny<=(float)cy1)) return 0;   /* fully outside (also rejects NaN) */
+    float fx0=floorf(minx), fx1=ceilf(maxx), fy0=floorf(miny), fy1=ceilf(maxy);
+    int x0=fx0<(float)cx0?cx0:(fx0>(float)cx1?cx1:(int)fx0), x1=fx1>(float)cx1?cx1:(fx1<(float)cx0?cx0:(int)fx1);
+    int y0=fy0<(float)cy0?cy0:(fy0>(float)cy1?cy1:(int)fy0), y1=fy1>(float)cy1?cy1:(fy1<(float)cy0?cy0:(int)fy1);
+    if(x0>=x1||y0>=y1) return 0;
+    if(ntris>=tris_cap){ tris_cap=tris_cap?tris_cap*2:1024; tris=realloc(tris,tris_cap*sizeof(TriSetup)); }
+    TriSetup *t=&tris[ntris++]; t->a=a; t->b=b; t->c=c; t->inv=1.0f/area;
+    t->dw0=-(c.y-b.y); t->dw1=-(a.y-c.y); t->dw2=-(b.y-a.y);
+    t->x0=x0; t->x1=x1; t->y0=y0; t->y1=y1;
+    t->tl0=is_tl(b.x,b.y,c.x,c.y); t->tl1=is_tl(c.x,c.y,a.x,a.y); t->tl2=is_tl(a.x,a.y,b.x,b.y);
+    t->flat=(a.col==b.col&&b.col==c.col);
+    return 1;
+}
+/* Narrow [*xs,*xe) to the pixels where w + dw*(x-x0) can still be >= 0 (conservative, 1px margin; exact test still runs per pixel). Returns 0 if the row is empty. */
+static inline int narrow_edge(float w,float dw,int x0,int *xs,int *xe){
+    if(dw==0.0f) return !(w<0.0f);
+    if(dw>0.0f){ float v=-w/dw; if(!(v==v)) return 1; if(v>(float)(*xe-x0)+2.0f) return 0; if(v>-1.0e6f){ int lo=x0+(int)floorf(v)-1; if(lo>*xs) *xs=lo; } }
+    else { float v=w/(-dw); if(!(v==v)) return 1; if(v<-2.0f) return 0; if(v<1.0e6f){ int hi=x0+(int)floorf(v)+2; if(hi<*xe) *xe=hi; } }
+    return *xs<*xe;
+}
+static void tri_rows(Surf*rt,const TriSetup *t,int ya,int yb){
+    (void)rt;
+    const Vtx a=t->a,b=t->b,c=t->c; float inv=t->inv, dw0=t->dw0, dw1=t->dw1, dw2=t->dw2;
+    int y0=t->y0>ya?t->y0:ya, y1=t->y1<yb?t->y1:yb;
     for(int y=y0;y<y1;y++){
-        float py=y+0.5f, px0=x0+0.5f;
+        float py=y+0.5f, px0=t->x0+0.5f;
         float w0=edge(b.x,b.y,c.x,c.y,px0,py), w1=edge(c.x,c.y,a.x,a.y,px0,py), w2=edge(a.x,a.y,b.x,b.y,px0,py);
-        for(int x=x0;x<x1;x++,w0+=dw0,w1+=dw1,w2+=dw2){
-            if(!(w0>0||(w0==0&&tl0))||!(w1>0||(w1==0&&tl1))||!(w2>0||(w2==0&&tl2))) continue;
+        int xs=t->x0, xe=t->x1;
+        if(!narrow_edge(w0,dw0,t->x0,&xs,&xe)||!narrow_edge(w1,dw1,t->x0,&xs,&xe)||!narrow_edge(w2,dw2,t->x0,&xs,&xe)) continue;
+        if(xs>t->x0){ float pxs=xs+0.5f; w0=edge(b.x,b.y,c.x,c.y,pxs,py); w1=edge(c.x,c.y,a.x,a.y,pxs,py); w2=edge(a.x,a.y,b.x,b.y,pxs,py); }
+        for(int x=xs;x<xe;x++,w0+=dw0,w1+=dw1,w2+=dw2){
+            if(!(w0>0||(w0==0&&t->tl0))||!(w1>0||(w1==0&&t->tl1))||!(w2>0||(w2==0&&t->tl2))) continue;
             float l0=w0*inv,l1=w1*inv,l2=w2*inv;
             uint32_t col;
-            if(flat) col=a.col; else {
+            if(t->flat) col=a.col; else {
                 col=0;
                 for(int ch=0;ch<4;ch++){ float v=l0*((a.col>>(ch*8))&255)+l1*((b.col>>(ch*8))&255)+l2*((c.col>>(ch*8))&255); int iv=(int)(v+0.5f); if(iv>255)iv=255; if(iv<0)iv=0; col|=(uint32_t)iv<<(ch*8); }
             }
             shade_px(x,y,col,l0*a.u+l1*b.u+l2*c.u,l0*a.v+l1*b.v+l2*c.v);
         }
     }
+}
+#define RBO_BANDS 8
+#ifdef RBO_TEST_BANDS
+#define RBO_PAR_MIN_PIXELS 1
+#else
+#define RBO_PAR_MIN_PIXELS 6000
+#endif
+static Surf *par_rt;
+static void band_work(void *ctx,size_t i){
+    (void)ctx; int h=par_rt->h; int ya=(int)((size_t)h*i/RBO_BANDS), yb=(int)((size_t)h*(i+1)/RBO_BANDS);
+    for(size_t k=0;k<ntris;k++){ const TriSetup *t=&tris[k]; if(t->y1<=ya||t->y0>=yb) continue; tri_rows(par_rt,t,ya,yb); }
+}
+/* Rasterize every triangle collected for this draw (in order). Big draws are split into horizontal bands and drawn in parallel; bands never share pixels, so order per pixel is preserved. */
+static void raster_flush(Surf*rt){
+    if(!ntris) return;
+#if defined(__APPLE__) || defined(RBO_TEST_BANDS)
+    size_t px=0; for(size_t k=0;k<ntris;k++) px+=(size_t)(tris[k].x1-tris[k].x0)*(size_t)(tris[k].y1-tris[k].y0);
+    if(px>=RBO_PAR_MIN_PIXELS){ par_rt=rt;
+#ifdef RBO_TEST_BANDS
+        for(size_t i=RBO_BANDS;i-->0;) band_work(NULL,i);   /* serial, reverse order: proves bands are independent */
+#else
+        dispatch_apply_f(RBO_BANDS,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),NULL,band_work);
+#endif
+        ntris=0; return; }
+#endif
+    for(size_t k=0;k<ntris;k++) tri_rows(rt,&tris[k],0,rt->h);
+    ntris=0;
 }
 static void mulvec(const float*m,float x,float y,float z,float*o){
     for(int i=0;i<4;i++) o[i]=x*m[i]+y*m[4+i]+z*m[8+i]+m[12+i];
@@ -201,29 +266,34 @@ static void mat_mul(const float*a,const float*b,float*r){ float t[16]; for(int i
 static int fvf_stride(uint32_t fvf){
     int s=0; if(fvf&4) s+=16; else if(fvf&2) s+=12; if(fvf&0x10) s+=12; if(fvf&0x20) s+=4; if(fvf&0x40) s+=4; if(fvf&0x80) s+=4; s+=((fvf>>8)&15)*8; return s;
 }
+static float wvp[16];
 static void read_vtx(uint32_t p,uint32_t fvf,Vtx *v){
     memset(v,0,sizeof *v); v->col=0xFFFFFFFFu; uint32_t o=p;
     float x=*(float*)(gmem+o),y=*(float*)(gmem+o+4),z=*(float*)(gmem+o+8);
     if(fvf&4){ v->x=x; v->y=y; v->z=z; v->rhw=*(float*)(gmem+o+12); o+=16; }
-    else { float m[16],t[16]; mat_mul(D.world,D.view,m); mat_mul(m,D.proj,t); float c[4]; mulvec(t,x,y,z,c);
+    else { float c[4]; mulvec(wvp,x,y,z,c);
         float w=c[3]!=0?c[3]:1; v->x=D.vpx+(1+c[0]/w)*D.vpw*0.5f; v->y=D.vpy+(1-c[1]/w)*D.vph*0.5f; v->z=c[2]/w; v->rhw=1/w; o+=12; }
     if(fvf&0x10) o+=12; if(fvf&0x20) o+=4;
     if(fvf&0x40){ v->col=*(uint32_t*)(gmem+o); o+=4; }
     if(fvf&0x80) o+=4;
     if(((fvf>>8)&15)>=1){ v->u=*(float*)(gmem+o); v->v=*(float*)(gmem+o+4); }
 }
+static Vtx *vbuf=NULL; static size_t vbuf_cap=0;
 static void draw(uint32_t type,uint32_t fvf,uint32_t vp,uint32_t nv,uint32_t idxp,uint32_t ni){
     Surf *rt=surf_of(D.target); if(!rt) return;
     int stride=fvf_stride(fvf); D.draws++; rc_setup(rt);
     uint32_t n = idxp?ni:nv;
-    Vtx *vv=malloc(sizeof(Vtx)*(nv?nv:1));
+    if(!(fvf&4)){ float m[16]; mat_mul(D.world,D.view,m); mat_mul(m,D.proj,wvp); }
+    if((size_t)(nv?nv:1)>vbuf_cap){ vbuf_cap=(size_t)(nv?nv:1)*2; free(vbuf); vbuf=malloc(sizeof(Vtx)*vbuf_cap); }
+    Vtx *vv=vbuf;
     for(uint32_t i=0;i<nv;i++) read_vtx(vp+i*stride,fvf,&vv[i]);
     #define VI(k) vv[ idxp ? rd16(idxp+2*(k)) : (k) ]
-    if(type==4) for(uint32_t i=0;i+2<n;i+=3) raster_tri(rt,VI(i),VI(i+1),VI(i+2));
-    else if(type==5) for(uint32_t i=0;i+2<n;i++){ if(i&1) raster_tri(rt,VI(i+1),VI(i),VI(i+2)); else raster_tri(rt,VI(i),VI(i+1),VI(i+2)); }
-    else if(type==6) for(uint32_t i=1;i+1<n;i++) raster_tri(rt,VI(0),VI(i),VI(i+1));
+    ntris=0;
+    if(type==4) for(uint32_t i=0;i+2<n;i+=3) tri_setup(rt,VI(i),VI(i+1),VI(i+2));
+    else if(type==5) for(uint32_t i=0;i+2<n;i++){ if(i&1) tri_setup(rt,VI(i+1),VI(i),VI(i+2)); else tri_setup(rt,VI(i),VI(i+1),VI(i+2)); }
+    else if(type==6) for(uint32_t i=1;i+1<n;i++) tri_setup(rt,VI(0),VI(i),VI(i+1));
     else { static int warned; if(!warned++) fprintf(stderr,"[D3D] primitive type %u not rasterized\n",type); }
-    free(vv);
+    raster_flush(rt);
 }
 
 /* ---------- COM: IDirect3D7 ---------- */

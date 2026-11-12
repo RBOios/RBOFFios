@@ -16,8 +16,9 @@ struct VirtualPad: View {
         ("약 공격", DIK.a,  0.0,     0.130),   // bottom
     ]
     private let buttonDiameter: CGFloat = 0.135   // of screen height
-    private let clusterCentreY: CGFloat = 0.6425  // of screen height
-    private let pauseDiameter: CGFloat = 0.112    // of screen height
+    private let clusterCentreY: CGFloat = 0.70    // of screen height (moved down a little from 0.6425)
+    private let pauseDiameter: CGFloat = 0.112 * 2.0 / 3.0   // of screen height (1/3 smaller than before)
+    private let pauseTopMargin: CGFloat = 0.06               // gap between Pause and the top edge, of screen height
 
     var body: some View {
         GeometryReader { geo in
@@ -37,7 +38,7 @@ struct VirtualPad: View {
                 }
                 PadButton(label: "Pause", key: DIK.one, fontScale: 0.28)
                     .frame(width: pauseDiameter * h, height: pauseDiameter * h)
-                    .position(x: w / 2, y: (0.045 + 0.056) * h)
+                    .position(x: clusterCX, y: (pauseTopMargin + pauseDiameter / 2) * h)   // top right, above the button cluster
             }
             .frame(width: w, height: h)
         }
