@@ -19,6 +19,8 @@ void rbo_stop(void);
 int  rbo_is_running(void);
 /* DirectInput scan code (e.g. 0xC8 up, 0xD0 down, 0xCB left, 0xCD right, 0x1E A, 0x1F S, 0x20 D, 0x21 F). Thread-safe. */
 void rbo_set_key(int dik, int down);
+/* Performance counters: frames presented so far and total milliseconds spent converting/handing them to the host. */
+void rbo_get_stats(int *frames, double *present_ms_total);
 /* Pull 44.1 kHz stereo int16 audio (call from the audio thread). Returns frames actually produced; the rest is silence. */
 int  rbo_audio_pull(int16_t *stereo, int frames);
 #ifdef __cplusplus

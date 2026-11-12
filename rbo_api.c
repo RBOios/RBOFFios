@@ -4,10 +4,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 
 int rbo_run(const char *exe);
 void dx_set_key(int dik,int down);
 extern void (*g_host_present)(void *ctx,const uint32_t *bgra,int w,int h);
+extern uint64_t g_stat_present_us;
 extern void *g_host_ctx; extern volatile int g_stop_req; extern int g_audio_ring_on;
 
 static pthread_t th; static volatile int running=0; static RboCallbacks cbs; static char exe_path[1024];
@@ -23,9 +27,14 @@ int rbo_start(const char *root,const char *exe,const RboCallbacks *cb){
     g_host_present=cbs.present?(void(*)(void*,const uint32_t*,int,int))cbs.present:NULL; g_host_ctx=cbs.ctx; g_stop_req=0; g_audio_ring_on=1;
     running=1;
     pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at,8u<<20);
+#ifdef __APPLE__
+    /* run the emulator on the performance cores instead of letting iOS park it on efficiency cores */
+    pthread_attr_set_qos_class_np(&at,QOS_CLASS_USER_INTERACTIVE,0);
+#endif
     if(pthread_create(&th,&at,thread_main,NULL)!=0){ running=0; return -2; }
     return 0;
 }
 void rbo_stop(void){ g_stop_req=1; }
 int rbo_is_running(void){ return running; }
 void rbo_set_key(int dik,int down){ dx_set_key(dik,down); }
+void rbo_get_stats(int *frames,double *present_ms_total){ if(frames) *frames=g_frames; if(present_ms_total) *present_ms_total=(double)g_stat_present_us/1000.0; }

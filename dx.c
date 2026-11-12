@@ -93,6 +93,13 @@ static void do_blt(Surf*d,Rc dr,Surf*s,Rc sr,int keyed){
     int dw=dr.r-dr.l, dh=dr.b-dr.t, sw=sr.r-sr.l, sh=sr.b-sr.t;
     if(dw<=0||dh<=0||sw<=0||sh<=0) return;
     int same=(d->bpp==s->bpp&&d->rmask==s->rmask&&d->gmask==s->gmask&&d->bmask==s->bmask);
+    /* fast path: identical format, 1:1, no colour key, fully inside both surfaces -> copy whole rows */
+    if(same && d!=s && !(keyed&&s->ck_valid) && dw==sw && dh==sh && (d->bpp==16||d->bpp==32)
+       && dr.l>=0&&dr.t>=0&&dr.r<=d->w&&dr.b<=d->h && sr.l>=0&&sr.t>=0&&sr.r<=s->w&&sr.b<=s->h){
+        int bp=d->bpp/8;
+        for(int y=0;y<dh;y++) memcpy(gmem+d->pix+(size_t)(dr.t+y)*d->pitch+dr.l*bp, gmem+s->pix+(size_t)(sr.t+y)*s->pitch+sr.l*bp, (size_t)dw*bp);
+        return;
+    }
     for(int y=0;y<dh;y++){
         int dy=dr.t+y; if(dy<0||dy>=d->h) continue;
         int sy=sr.t+(int)((int64_t)y*sh/dh); if(sy<0||sy>=s->h) continue;
@@ -106,6 +113,16 @@ static void do_blt(Surf*d,Rc dr,Surf*s,Rc sr,int keyed){
     }
 }
 static void do_fill(Surf*d,Rc r,uint32_t c){
+    if(d->bpp==16||d->bpp==32){
+        int l=r.l<0?0:r.l, t=r.t<0?0:r.t, rr=r.r>d->w?d->w:r.r, bb=r.b>d->h?d->h:r.b;
+        if(l>=rr||t>=bb) return;
+        for(int y=t;y<bb;y++){
+            uint8_t *row=gmem+d->pix+(size_t)y*d->pitch;
+            if(d->bpp==16){ uint16_t *p=(uint16_t*)row+l; uint16_t v=(uint16_t)c; for(int x=l;x<rr;x++) *p++=v; }
+            else { uint32_t *p=(uint32_t*)row+l; for(int x=l;x<rr;x++) *p++=c; }
+        }
+        return;
+    }
     for(int y=r.t;y<r.b;y++){ if(y<0||y>=d->h)continue; for(int x=r.l;x<r.r;x++){ if(x<0||x>=d->w)continue; putpx(d,x,y,c);} }
 }
 
@@ -123,19 +140,43 @@ void present_frame_file(const char *path,const uint8_t *pix,int w,int h,int pitc
 void dx_dump_primary(const char *path){ if(primary_id<0) return; Surf *p=&S[primary_id]; present_frame_file(path,gmem+p->pix,p->w,p->h,p->pitch,p->bpp,p->rmask,p->gmask,p->bmask); }
 void (*g_host_present)(void *ctx,const uint32_t *bgra,int w,int h)=NULL; void *g_host_ctx=NULL; volatile int g_stop_req=0;
 static uint32_t *host_buf=NULL; static size_t host_cap=0;
+static uint32_t hp_lut16[65536]; static uint32_t hp_lut_rm=0,hp_lut_gm=0,hp_lut_bm=0; static int hp_lut_ok=0;
+uint64_t g_stat_present_us=0;      /* total time spent converting + handing frames to the host (for the on-screen stats) */
 static void host_present(Surf *p,int l,int t,int r,int b){
     int w=r-l, h=b-t; if(w<=0||h<=0) return;
+    uint64_t t_start=nowus();
     if((size_t)w*h>host_cap){ free(host_buf); host_cap=(size_t)w*h; host_buf=malloc(host_cap*4); }
     uint32_t rm=p->rmask,gm=p->gmask,bm=p->bmask; int rs=mask_shift(rm),gs=mask_shift(gm),bs=mask_shift(bm), rb=mask_bits(rm),gb=mask_bits(gm),bb=mask_bits(bm);
-    for(int y=0;y<h;y++){
-        const uint8_t *row=gmem+p->pix+(t+y)*p->pitch+l*(p->bpp/8); uint32_t *o=host_buf+(size_t)y*w;
-        for(int x=0;x<w;x++){
-            uint32_t v=p->bpp==16?((const uint16_t*)row)[x]:((const uint32_t*)row)[x];
-            uint32_t R=rb?(((v&rm)>>rs)*255/((1u<<rb)-1)):0, G=gb?(((v&gm)>>gs)*255/((1u<<gb)-1)):0, B=bb?(((v&bm)>>bs)*255/((1u<<bb)-1)):0;
-            o[x]=0xFF000000u|(R<<16)|(G<<8)|B;      /* BGRA8 little-endian */
+    if(p->bpp==16){
+        /* 64K-entry table built once per pixel format (same maths as before, just precomputed) */
+        if(!hp_lut_ok||hp_lut_rm!=rm||hp_lut_gm!=gm||hp_lut_bm!=bm){
+            for(uint32_t v=0;v<65536;v++){
+                uint32_t R=rb?(((v&rm)>>rs)*255/((1u<<rb)-1)):0, G=gb?(((v&gm)>>gs)*255/((1u<<gb)-1)):0, B=bb?(((v&bm)>>bs)*255/((1u<<bb)-1)):0;
+                hp_lut16[v]=0xFF000000u|(R<<16)|(G<<8)|B;
+            }
+            hp_lut_rm=rm; hp_lut_gm=gm; hp_lut_bm=bm; hp_lut_ok=1;
+        }
+        for(int y=0;y<h;y++){
+            const uint16_t *row=(const uint16_t*)(gmem+p->pix+(size_t)(t+y)*p->pitch+l*2); uint32_t *o=host_buf+(size_t)y*w;
+            for(int x=0;x<w;x++) o[x]=hp_lut16[row[x]];
+        }
+    } else if(rb==8&&gb==8&&bb==8){
+        for(int y=0;y<h;y++){
+            const uint32_t *row=(const uint32_t*)(gmem+p->pix+(size_t)(t+y)*p->pitch+l*4); uint32_t *o=host_buf+(size_t)y*w;
+            for(int x=0;x<w;x++){ uint32_t v=row[x]; o[x]=0xFF000000u|(((v&rm)>>rs)<<16)|(((v&gm)>>gs)<<8)|((v&bm)>>bs); }
+        }
+    } else {
+        for(int y=0;y<h;y++){
+            const uint8_t *row=gmem+p->pix+(size_t)(t+y)*p->pitch+l*(p->bpp/8); uint32_t *o=host_buf+(size_t)y*w;
+            for(int x=0;x<w;x++){
+                uint32_t v=((const uint32_t*)row)[x];
+                uint32_t R=rb?(((v&rm)>>rs)*255/((1u<<rb)-1)):0, G=gb?(((v&gm)>>gs)*255/((1u<<gb)-1)):0, B=bb?(((v&bm)>>bs)*255/((1u<<bb)-1)):0;
+                o[x]=0xFF000000u|(R<<16)|(G<<8)|B;
+            }
         }
     }
     g_host_present(g_host_ctx,host_buf,w,h);
+    g_stat_present_us+=nowus()-t_start;
 }
 void ds_tick(void);
 static void present(void){
