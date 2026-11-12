@@ -1,0 +1,47 @@
+name: RBOiOS
+options:
+  bundleIdPrefix: com.example.rbo
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    SWIFT_VERSION: "5.0"
+    ENABLE_BITCODE: "NO"
+targets:
+  RBOiOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: RBOiOS
+      - path: ../cpu.c
+      - path: ../hle.c
+      - path: ../win.c
+      - path: ../dx.c
+      - path: ../d3d.c
+      - path: ../dshow.c
+      - path: ../sched.c
+      - path: ../pe.c
+      - path: ../main.c
+      - path: ../rbo_api.c
+      - path: ../cpu.h
+        buildPhase: none
+      - path: ../hle.h
+        buildPhase: none
+      - path: ../dxshared.h
+        buildPhase: none
+      - path: ../rbo_api.h
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.rbo.ios
+        GCC_PREPROCESSOR_DEFINITIONS: "RBO_LIBRARY=1"
+        OTHER_CFLAGS: "-O3 -Wno-unused-function -Wno-misleading-indentation"
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/.."
+        SWIFT_OBJC_BRIDGING_HEADER: RBOiOS/RBOiOS-Bridging-Header.h
+        INFOPLIST_FILE: RBOiOS/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: "NO"
+        OTHER_LDFLAGS: "-lm"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
