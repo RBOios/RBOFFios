@@ -1,6 +1,11 @@
 name: Build unsigned IPA
 on:
   workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: RBOFFios_project
+  
 jobs:
   build:
     runs-on: macos-latest
