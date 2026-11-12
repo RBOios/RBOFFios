@@ -11,6 +11,8 @@ extern int g_max_frames;
 extern int g_frames;
 extern int g_fast;
 void hle_vsync_advance(void);
+void hle_sleep_us(uint64_t us);          /* usleep that is added to the idle-time counter */
+extern uint64_t g_stat_idle_us;
 uint64_t hle_now_us(void);
 void hle_set_event(uint32_t h);
 void sched_frame_boundary(void);

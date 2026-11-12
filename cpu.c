@@ -572,6 +572,9 @@ void cpu_run(uint32_t stop_eip){
         if(cpu.eip==THREAD_EXIT_MAGIC){ sched_thread_exit(); continue; }
         if(cpu.eip>=HLE_BASE){ hle_dispatch((cpu.eip-HLE_BASE)>>2); if(g_switch&&g_nest==0){ g_switch=0; sched_switch(); } continue; }
         if(cpu.eip<g_code_lo||cpu.eip>=g_code_hi){ fprintf(stderr,"[BAD EIP] jumped to %08x\n",cpu.eip); fprintf(stderr,"  last EIPs:"); for(int i=40;i>0;i--) fprintf(stderr," %08x",ring[(ringp-i)&255]); fprintf(stderr,"\n  regs EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x\n",cpu.r[0],cpu.r[1],cpu.r[2],cpu.r[3],cpu.r[4],cpu.r[5],cpu.r[6],cpu.r[7]); abort(); }
-        ring[ringp++&255]=cpu.eip; step(); cpu.icount++;
+        #ifndef RBO_LIBRARY
+        ring[ringp++&255]=cpu.eip;   /* debug trail for crash dumps; skipped in the embedded (iOS) build */
+#endif
+        step(); cpu.icount++;
     }
 }

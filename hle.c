@@ -103,6 +103,8 @@ uint32_t guest_call(uint32_t fn,int n,const uint32_t *args){
 /* ---------------- time ---------------- */
 static uint64_t now_us(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (uint64_t)ts.tv_sec*1000000u+ts.tv_nsec/1000; }
 static uint64_t t0_us;
+uint64_t g_stat_idle_us=0;   /* wall time spent sleeping instead of interpreting (for the on-screen stats) */
+void hle_sleep_us(uint64_t us){ uint64_t a=now_us(); usleep((useconds_t)us); g_stat_idle_us+=now_us()-a; }
 int g_fast=0; static uint64_t vbase_ms=10000; static int vk=0;
 /* fast mode: guest time never runs slower than the frame clock (16.667 ms/frame); intra-frame timeGetTime ticks are
    capped at 16 ms per frame and idle waits advance the base directly (so they are not counted twice). */
@@ -223,8 +225,8 @@ static void h_Sleep(void){
         if(!waiting){ sched_set_waiting(1); *dl=now+(uint64_t)A(0)*1000ull; g_retry=1; return; }
         if(now<*dl){ g_retry=1; return; }
         sched_set_waiting(0); RET(0); return; }
-    if(g_fast) vk+=(int)A(0); else usleep(A(0)*1000u); RET(0); }
-void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else usleep(1000); }
+    if(g_fast) vk+=(int)A(0); else hle_sleep_us(A(0)*1000u); RET(0); }
+void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else hle_sleep_us(1000); }
 static void h_GetTickCount(void){ RET(vnow()); }
 static void h_timeGetTime(void){ RET(vnow()); }
 static void h_QueryPerformanceCounter(void){ uint64_t t=now_us()-t0_us; wr32(A(0),(uint32_t)t); wr32(A(0)+4,(uint32_t)(t>>32)); RET(1); }

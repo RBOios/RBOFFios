@@ -11,7 +11,7 @@
 int rbo_run(const char *exe);
 void dx_set_key(int dik,int down);
 extern void (*g_host_present)(void *ctx,const uint32_t *bgra,int w,int h);
-extern uint64_t g_stat_present_us;
+extern uint64_t g_stat_present_us; extern uint64_t g_stat_idle_us; extern CPU cpu;
 extern void *g_host_ctx; extern volatile int g_stop_req; extern int g_audio_ring_on;
 
 static pthread_t th; static volatile int running=0; static RboCallbacks cbs; static char exe_path[1024];
@@ -38,3 +38,6 @@ void rbo_stop(void){ g_stop_req=1; }
 int rbo_is_running(void){ return running; }
 void rbo_set_key(int dik,int down){ dx_set_key(dik,down); }
 void rbo_get_stats(int *frames,double *present_ms_total){ if(frames) *frames=g_frames; if(present_ms_total) *present_ms_total=(double)g_stat_present_us/1000.0; }
+void rbo_get_stats2(int *frames,double *present_ms_total,double *idle_ms_total,uint64_t *guest_instructions){
+    rbo_get_stats(frames,present_ms_total); if(idle_ms_total) *idle_ms_total=(double)g_stat_idle_us/1000.0; if(guest_instructions) *guest_instructions=cpu.icount;
+}

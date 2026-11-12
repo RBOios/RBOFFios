@@ -22,6 +22,8 @@ void rbo_set_key(int dik, int down);
 /* Performance counters: frames presented so far and total milliseconds spent converting/handing them to the host. */
 void rbo_get_stats(int *frames, double *present_ms_total);
 /* Pull 44.1 kHz stereo int16 audio (call from the audio thread). Returns frames actually produced; the rest is silence. */
+/* Extra counters for diagnosing slowness: total ms spent sleeping (idle) and guest x86 instructions executed so far. */
+void rbo_get_stats2(int *frames, double *present_ms_total, double *idle_ms_total, uint64_t *guest_instructions);
 int  rbo_audio_pull(int16_t *stereo, int frames);
 #ifdef __cplusplus
 }

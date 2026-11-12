@@ -50,6 +50,8 @@ struct GameScreen: View {
     @State private var statsText = ""
     @State private var lastFrames: Int32 = 0
     @State private var lastPresentMs: Double = 0
+    @State private var lastIdleMs: Double = 0
+    @State private var lastInsns: UInt64 = 0
     private let statsTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -73,11 +75,13 @@ struct GameScreen: View {
             }
         }
         .onReceive(statsTimer) { _ in
-            var f: Int32 = 0; var ms: Double = 0
-            rbo_get_stats(&f, &ms)
+            var f: Int32 = 0; var ms: Double = 0; var idle: Double = 0; var insns: UInt64 = 0
+            rbo_get_stats2(&f, &ms, &idle, &insns)
             let df = Int(f - lastFrames), dms = ms - lastPresentMs
-            lastFrames = f; lastPresentMs = ms
-            statsText = String(format: "%d FPS · 화면변환 %.1fms", df, df > 0 ? dms / Double(df) : 0)
+            let didle = idle - lastIdleMs, dins = insns &- lastInsns
+            lastFrames = f; lastPresentMs = ms; lastIdleMs = idle; lastInsns = insns
+            // 대기 = 1초 중 잠들어 있던 비율(%), MIPS = 초당 실행한 x86 명령어(백만 단위)
+            statsText = String(format: "%d FPS · 화면변환 %.1fms · 대기 %.0f%% · %.0f MIPS", df, df > 0 ? dms / Double(df) : 0, didle / 10.0, Double(dins) / 1_000_000.0)
         }
         .onAppear {
             guard let p = MetalPresenter.make() else { return }
