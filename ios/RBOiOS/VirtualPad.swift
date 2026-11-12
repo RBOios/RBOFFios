@@ -1,25 +1,31 @@
 import SwiftUI
 
-/// On-screen analog stick + action buttons + Pause.
+/// On-screen analog stick + action buttons + Pause (round).
 /// Look and layout are ported from UnleashedRecomp's touch_controls.cpp (stick, face buttons, START pill).
 /// Stick -> arrow keys, A/S/D/F -> 약 공격 / 강 공격 / 방어 / 특수, "1" -> Pause.
 struct VirtualPad: View {
     // Stick frame as fractions of the screen (x, y, width, height), same default as the original layout.
     private let stickFrame = CGRect(x: 0.055, y: 0.560, width: 0.190, height: 0.315)
-    // Round buttons: centre as a fraction of the screen, diameter as a fraction of the screen height.
-    private let buttons: [(label: String, key: Int32, cx: CGFloat, cy: CGFloat)] = [
-        ("특수",   DIK.f, 0.7925, 0.5125),   // top
-        ("방어",   DIK.d, 0.7325, 0.6425),   // left
-        ("강 공격", DIK.s, 0.8525, 0.6425),   // right
-        ("약 공격", DIK.a, 0.7925, 0.7725),   // bottom
+    // Game picture is drawn aspect-fit and centred (Expansion 3 renders 1280x1024); the rest of the screen is black bars.
+    private let gameAspect: CGFloat = 1280.0 / 1024.0
+    // Round buttons, laid out in a diamond. Units: fractions of the screen height, relative to the cluster centre.
+    private let buttons: [(label: String, key: Int32, dx: CGFloat, dy: CGFloat)] = [
+        ("특수",   DIK.f,  0.0,    -0.130),   // top
+        ("방어",   DIK.d, -0.1075,  0.0),     // left
+        ("강 공격", DIK.s,  0.1075,  0.0),     // right
+        ("약 공격", DIK.a,  0.0,     0.130),   // bottom
     ]
-    private let buttonDiameter: CGFloat = 0.135
-    // Pause pill (the original START button's look), top centre.
-    private let pauseFrame = CGRect(x: 0.4575, y: 0.045, width: 0.085, height: 0.112)
+    private let buttonDiameter: CGFloat = 0.135   // of screen height
+    private let clusterCentreY: CGFloat = 0.6425  // of screen height
+    private let pauseDiameter: CGFloat = 0.112    // of screen height
 
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width, h = geo.size.height
+            // Centre of the right-hand black bar, so the buttons stay off the game picture
+            // (on screens with no bar, e.g. iPad, they just stay inside the right edge).
+            let barWidth = max((w - gameAspect * h) / 2, 0)
+            let clusterCX = min(w - barWidth / 2, w - 0.205 * h)
             ZStack {
                 AnalogStick()
                     .frame(width: stickFrame.width * w, height: stickFrame.height * h)
@@ -27,14 +33,15 @@ struct VirtualPad: View {
                 ForEach(buttons, id: \.label) { b in
                     PadButton(label: b.label, key: b.key, fontScale: 0.30)
                         .frame(width: buttonDiameter * h, height: buttonDiameter * h)
-                        .position(x: b.cx * w, y: b.cy * h)
+                        .position(x: clusterCX + b.dx * h, y: clusterCentreY * h + b.dy * h)
                 }
-                PadButton(label: "Pause", key: DIK.one, fontScale: 0.30)
-                    .frame(width: pauseFrame.width * w, height: pauseFrame.height * h)
-                    .position(x: pauseFrame.midX * w, y: pauseFrame.midY * h)
+                PadButton(label: "Pause", key: DIK.one, fontScale: 0.28)
+                    .frame(width: pauseDiameter * h, height: pauseDiameter * h)
+                    .position(x: w / 2, y: (0.045 + 0.056) * h)
             }
             .frame(width: w, height: h)
         }
+        .ignoresSafeArea()
     }
 }
 

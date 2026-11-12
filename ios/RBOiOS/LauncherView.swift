@@ -46,6 +46,7 @@ struct LauncherView: View {
                 .font(.footnote).foregroundColor(.gray)
             if !message.isEmpty { Text(message).font(.footnote).foregroundColor(.orange) }
         }
+        .fixedSize(horizontal: true, vertical: false)   // panel hugs its content (Divider would otherwise stretch it full width)
         .padding(24)
         .background(Color.black.opacity(0.6))
         .cornerRadius(16)
