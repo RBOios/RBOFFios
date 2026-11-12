@@ -48,7 +48,8 @@ struct VirtualPad: View {
 /// Four-piece D-pad image (outline only, transparent background). Touch position -> up/down/left/right, diagonals when two sectors overlap.
 struct DPad: View {
     private struct Dir: Equatable { var l = false, r = false, u = false, d = false }
-    private static let idleOpacity: Double = 0.80     // pieces at rest
+    private static let idleOpacity: Double = 0.32     // pieces at rest (same as the action-button outline)
+    private static let pressedOpacity: Double = 0.80  // pressed (same as the action buttons)
     private static let deadzone: CGFloat = 0.12       // fraction of the pad radius where nothing is pressed
     private static let sector: CGFloat = 0.38         // sin(22.5 deg): 8-way split
     @State private var dir = Dir()
@@ -77,8 +78,7 @@ struct DPad: View {
         Image(name)
             .resizable()
             .scaledToFit()
-            .opacity(pressed ? 1.0 : Self.idleOpacity)
-            .brightness(pressed ? 0.30 : 0)
+            .opacity(pressed ? Self.pressedOpacity : Self.idleOpacity)
     }
 
     private func update(dx: CGFloat, dy: CGFloat, radius: CGFloat) {
@@ -110,8 +110,7 @@ struct PauseButton: View {
         Image("PauseButton")
             .resizable()
             .scaledToFit()
-            .opacity(held ? 1.0 : 0.80)
-            .brightness(held ? 0.30 : 0)
+            .opacity(held ? 0.80 : 0.32)       // same as the action-button outline (idle 0.32, pressed 0.80)
             .padding(10)                       // bigger touch target than the picture itself
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
