@@ -48,11 +48,28 @@ struct GameScreen: View {
     @State private var pad = PadInput()
     // Performance readout (top-left): frames shown per second and average ms spent converting/handing over each frame.
     @State private var statsText = ""
+    @State private var profText = ""
+    @State private var logHandle: FileHandle? = nil
+    @State private var logStart = Date()
     @State private var lastFrames: Int32 = 0
     @State private var lastPresentMs: Double = 0
     @State private var lastIdleMs: Double = 0
     @State private var lastInsns: UInt64 = 0
     private let statsTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+
+    private func openLog() {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let df = DateFormatter(); df.dateFormat = "yyyyMMdd_HHmmss"
+        let url = docs.appendingPathComponent("rbo_perf_\(df.string(from: Date())).txt")
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        guard let h = try? FileHandle(forWritingTo: url) else { return }
+        logHandle = h; logStart = Date()
+        logLine("RBO perf log · \(UIDevice.current.model) · iOS \(UIDevice.current.systemVersion) · \(edition.exeName)")
+    }
+    private func logLine(_ s: String) {
+        guard let h = logHandle, let d = (s + "\n").data(using: .utf8) else { return }
+        try? h.write(contentsOf: d)
+    }
 
     var body: some View {
         ZStack {
@@ -60,8 +77,12 @@ struct GameScreen: View {
             VirtualPad()
             VStack {
                 HStack {
-                    Text(statsText).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundColor(.green)
-                        .padding(4).background(Color.black.opacity(0.5)).cornerRadius(4)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(statsText)
+                        Text(profText)
+                    }
+                    .font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundColor(.green)
+                    .padding(4).background(Color.black.opacity(0.5)).cornerRadius(4)
                     Spacer()
                 }
                 Spacer()
@@ -81,12 +102,24 @@ struct GameScreen: View {
             let didle = idle - lastIdleMs, dins = insns &- lastInsns
             lastFrames = f; lastPresentMs = ms; lastIdleMs = idle; lastInsns = insns
             // 대기 = 1초 중 잠들어 있던 비율(%), MIPS = 초당 실행한 x86 명령어(백만 단위)
+            var pbuf = [CChar](repeating: 0, count: 2048)
+            _ = rbo_get_prof(&pbuf, Int32(pbuf.count))
+            let fullProf = String(cString: pbuf)
+            profText = fullProf.split(separator: "\n", omittingEmptySubsequences: false).prefix(7).joined(separator: "\n")
+            // one log line per second: Files 앱 > 내 iPhone > RBO 폴더의 rbo_perf_*.txt
+            let thermal = ProcessInfo.processInfo.thermalState.rawValue      // 0 정상, 1 약간 뜨거움, 2 심함, 3 위험
+            let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled ? 1 : 0
+            let head = String(format: "t=%d frames=%d fps=%d conv=%.1fms mips=%.0f thermal=%d lowpower=%d | ",
+                              Int32(Date().timeIntervalSince(logStart)), f, df, df > 0 ? dms / Double(df) : 0,
+                              Double(dins) / 1_000_000.0, thermal, lowPower)
+            logLine(head + fullProf.replacingOccurrences(of: "\n", with: " | "))
             statsText = String(format: "%d FPS · 화면변환 %.1fms · 대기 %.0f%% · %.0f MIPS", df, df > 0 ? dms / Double(df) : 0, didle / 10.0, Double(dins) / 1_000_000.0)
         }
         .onAppear {
             guard let p = MetalPresenter.make() else { return }
             let h = EmulatorHost(presenter: p)
-            h.onFinished = { finished = true }
+            h.onFinished = { finished = true; logLine("게임 종료") }
+            openLog()
             host = h; pad.start()
             h.start(root: root, exe: edition.exeName)
         }

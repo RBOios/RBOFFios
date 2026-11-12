@@ -24,6 +24,9 @@ void rbo_get_stats(int *frames, double *present_ms_total);
 /* Pull 44.1 kHz stereo int16 audio (call from the audio thread). Returns frames actually produced; the rest is silence. */
 /* Extra counters for diagnosing slowness: total ms spent sleeping (idle) and guest x86 instructions executed so far. */
 void rbo_get_stats2(int *frames, double *present_ms_total, double *idle_ms_total, uint64_t *guest_instructions);
+/* Profile text: 2 lines of time split (interpreter / HLE / sleeping) followed by the 12 busiest HLE functions over the last interval,
+ * one per line. Call once per interval (it keeps its own snapshot). UTF-8, returns length. */
+int  rbo_get_prof(char *out, int n);
 int  rbo_audio_pull(int16_t *stereo, int frames);
 #ifdef __cplusplus
 }

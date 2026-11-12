@@ -17,6 +17,15 @@ int g_cur_idx=0;
 const char *g_root=".";
 int g_max_frames=0, g_frames=0;
 
+/* ---------------- profiler ---------------- */
+static uint64_t now_ns(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (uint64_t)ts.tv_sec*1000000000ull+ts.tv_nsec; }
+#define PROF_MAX 4096
+static uint64_t pf_ns[PROF_MAX], pf_calls[PROF_MAX];       /* per HLE function: own time (ns) and call count */
+static uint64_t g_prof_hle_ns=0;                            /* total own time of all HLE functions */
+static uint64_t g_prof_guest_ns=0;                          /* time in nested guest code (guest_call), sleeps excluded */
+static uint64_t g_prof_sleep_ns[3]={0,0,0};                 /* sleeping, by source: Sleep / idle tick / vblank wait */
+static inline uint64_t prof_sleep_total(void){ return g_prof_sleep_ns[0]+g_prof_sleep_ns[1]+g_prof_sleep_ns[2]; }
+
 /* ---------------- registry ---------------- */
 #define MAX_HLE 4096
 static HleEntry tab[MAX_HLE];
@@ -42,7 +51,11 @@ void hle_dispatch_impl(uint32_t idx){
     if(g_trace>1) fprintf(stderr,"[hle] %s!%s(%08x,%08x,%08x,%08x)\n",e->dll,e->name,A(0),A(1),A(2),A(3));
     uint32_t ra=rd32(cpu.r[ESP]);
     uint32_t esp0=cpu.r[ESP];
-    g_cur_idx=(int)idx; g_retry=0; e->fn();
+    g_cur_idx=(int)idx; g_retry=0;
+    uint64_t pt0=now_ns(), pg0=g_prof_guest_ns, ps0=prof_sleep_total();
+    e->fn();
+    { uint64_t dt=now_ns()-pt0, inner=(g_prof_guest_ns-pg0)+(prof_sleep_total()-ps0), own=dt>inner?dt-inner:0;
+      if(idx<PROF_MAX){ pf_ns[idx]+=own; pf_calls[idx]++; } g_prof_hle_ns+=own; }
     if(cpu.halted||cpu.eip==THREAD_EXIT_MAGIC) return;
     if(g_retry){
         if(g_nest>0||sched_nthreads()==1){ /* cannot block here: report timeout instead of spinning */
@@ -94,7 +107,9 @@ uint32_t guest_call(uint32_t fn,int n,const uint32_t *args){
     for(int i=n-1;i>=0;i--){ cpu.r[ESP]-=4; wr32(cpu.r[ESP],args[i]); }
     cpu.r[ESP]-=4; wr32(cpu.r[ESP],EXIT_MAGIC);
     cpu.eip=fn;
+    uint64_t gt0=now_ns(), gs0=prof_sleep_total();
     g_nest++; cpu_run(EXIT_MAGIC); g_nest--;
+    { uint64_t el=now_ns()-gt0, sl=prof_sleep_total()-gs0; g_prof_guest_ns+= el>sl?el-sl:0; }
     uint32_t r=cpu.r[EAX];
     cpu.r[ESP]=saved_esp; cpu.eip=saved_eip;
     return r;
@@ -104,7 +119,7 @@ uint32_t guest_call(uint32_t fn,int n,const uint32_t *args){
 static uint64_t now_us(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (uint64_t)ts.tv_sec*1000000u+ts.tv_nsec/1000; }
 static uint64_t t0_us;
 uint64_t g_stat_idle_us=0;   /* wall time spent sleeping instead of interpreting (for the on-screen stats) */
-void hle_sleep_us(uint64_t us){ uint64_t a=now_us(); usleep((useconds_t)us); g_stat_idle_us+=now_us()-a; }
+void hle_sleep_us(uint64_t us,int src){ uint64_t a=now_ns(); usleep((useconds_t)us); uint64_t d=now_ns()-a; g_stat_idle_us+=d/1000; g_prof_sleep_ns[src<0||src>2?1:src]+=d; }
 int g_fast=0; static uint64_t vbase_ms=10000; static int vk=0;
 /* fast mode: guest time never runs slower than the frame clock (16.667 ms/frame); intra-frame timeGetTime ticks are
    capped at 16 ms per frame and idle waits advance the base directly (so they are not counted twice). */
@@ -225,8 +240,8 @@ static void h_Sleep(void){
         if(!waiting){ sched_set_waiting(1); *dl=now+(uint64_t)A(0)*1000ull; g_retry=1; return; }
         if(now<*dl){ g_retry=1; return; }
         sched_set_waiting(0); RET(0); return; }
-    if(g_fast) vk+=(int)A(0); else hle_sleep_us(A(0)*1000u); RET(0); }
-void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else hle_sleep_us(1000); }
+    if(g_fast) vk+=(int)A(0); else hle_sleep_us(A(0)*1000u,0); RET(0); }
+void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else hle_sleep_us(1000,1); }
 static void h_GetTickCount(void){ RET(vnow()); }
 static void h_timeGetTime(void){ RET(vnow()); }
 static void h_QueryPerformanceCounter(void){ uint64_t t=now_us()-t0_us; wr32(A(0),(uint32_t)t); wr32(A(0)+4,(uint32_t)(t>>32)); RET(1); }
@@ -410,4 +425,33 @@ void hle_init(void){
     R("USER32.dll","CharUpperA",1,h_CharUpperA);
     (void)h_zero; (void)h_one; (void)scratch;
     win_register(); ddraw_register(); dinput_register(); dsound_register();
+}
+
+/* Per-second profile for the on-screen overlay. Call from one thread (the UI timer). */
+int hle_prof_report(char *out,int n,int topk){
+    static uint64_t pr_wall=0, pr_hle=0, pr_sl[3]={0,0,0}, pr_ns[PROF_MAX], pr_calls[PROF_MAX];
+    uint64_t w=now_ns(), hle=g_prof_hle_ns, sl[3]={g_prof_sleep_ns[0],g_prof_sleep_ns[1],g_prof_sleep_ns[2]};
+    uint64_t cns[PROF_MAX], ccalls[PROF_MAX]; int nt=ntab<PROF_MAX?ntab:PROF_MAX;
+    for(int i=0;i<nt;i++){ cns[i]=pf_ns[i]; ccalls[i]=pf_calls[i]; }
+    int first=(pr_wall==0); double dw=(double)(w-pr_wall);
+    int len=0;
+    if(first||dw<=0) len=snprintf(out,n,"측정 중…");
+    else {
+        double dh=(double)(hle-pr_hle), d0=(double)(sl[0]-pr_sl[0]), d1=(double)(sl[1]-pr_sl[1]), d2=(double)(sl[2]-pr_sl[2]);
+        double ds=d0+d1+d2, di=dw-dh-ds; if(di<0) di=0;
+        len=snprintf(out,n,"인터프리터 %.0f%% · HLE %.0f%% · 대기 %.0f%%\n대기: Sleep %.0f%% · 유휴틱 %.0f%% · vblank %.0f%%",
+            100*di/dw,100*dh/dw,100*ds/dw,100*d0/dw,100*d1/dw,100*d2/dw);
+        int used[16]; for(int k=0;k<16;k++) used[k]=-1; if(topk>16) topk=16;
+        for(int k=0;k<topk;k++){
+            int best=-1; uint64_t bv=0;
+            for(int i=0;i<nt;i++){ int skip=0; for(int j=0;j<k;j++) if(used[j]==i) skip=1; if(skip) continue;
+                uint64_t dv=cns[i]-pr_ns[i]; if(dv>bv){ bv=dv; best=i; } }
+            if(best<0) break; used[k]=best;
+            double ms=(double)bv/1e6*(1e9/dw), calls=(double)(ccalls[best]-pr_calls[best])*(1e9/dw);
+            if(len<n) len+=snprintf(out+len,n-len,"\n%-24.24s %5.1fms/s %7.0f회/s",hle_name(best),ms,calls);
+        }
+    }
+    pr_wall=w; pr_hle=hle; for(int i=0;i<3;i++) pr_sl[i]=sl[i];
+    for(int i=0;i<nt;i++){ pr_ns[i]=cns[i]; pr_calls[i]=ccalls[i]; }
+    return len;
 }

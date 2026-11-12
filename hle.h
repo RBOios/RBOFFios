@@ -11,7 +11,8 @@ extern int g_max_frames;
 extern int g_frames;
 extern int g_fast;
 void hle_vsync_advance(void);
-void hle_sleep_us(uint64_t us);          /* usleep that is added to the idle-time counter */
+void hle_sleep_us(uint64_t us,int src);   /* usleep that is added to the idle-time counters; src: 0=Sleep 1=idle tick 2=vblank */
+int  hle_prof_report(char *out,int n,int topk);    /* human readable per-second profile (time split + top HLE functions) */
 extern uint64_t g_stat_idle_us;
 uint64_t hle_now_us(void);
 void hle_set_event(uint32_t h);

@@ -249,7 +249,7 @@ static void dd_GetAvailableVidMem(void){ if(A(2))wr32(A(2),64u<<20); if(A(3))wr3
 static void dd_WaitForVerticalBlank(void){
     uint64_t t=nowus(); uint64_t period=16667; uint64_t next=(last_vb? last_vb+period : t);
     if(g_fast){ hle_vsync_advance(); RET(0); return; }
-    if(next>t) hle_sleep_us(next-t); last_vb=next>t?next:t; RET(0);
+    if(next>t) hle_sleep_us(next-t,2); last_vb=next>t?next:t; RET(0);
 }
 
 static void sf_GetAttachedSurface(void){ Surf *s=surf_of(A(0)); if(s&&s->back_id>=0){ wr32(A(2),S[s->back_id].obj); RET(0);} else { wr32(A(2),0); RET(0x887602ACu /*DDERR_NOTFOUND*/);} }
