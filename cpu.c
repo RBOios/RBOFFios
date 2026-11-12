@@ -58,7 +58,11 @@ static inline uint32_t pop32(void){ uint32_t v=rd32(cpu.r[ESP]); cpu.r[ESP]+=4; 
 static inline void push16(uint16_t v){ cpu.r[ESP]-=2; wr16(cpu.r[ESP],v); }
 static inline uint16_t pop16(void){ uint16_t v=rd16(cpu.r[ESP]); cpu.r[ESP]+=2; return v; }
 
-static inline int parity8(uint32_t v){ v&=0xFF; v^=v>>4; v^=v>>2; v^=v>>1; return !(v&1); }
+#define PAR2(n) n, n^1, n^1, n
+#define PAR4(n) PAR2(n), PAR2(n^1), PAR2(n^1), PAR2(n)
+#define PAR6(n) PAR4(n), PAR4(n^1), PAR4(n^1), PAR4(n)
+static const uint8_t par_tab[256]={ PAR6(1), PAR6(0), PAR6(0), PAR6(1) };   /* 1 when the low byte has an even number of set bits */
+static inline int parity8(uint32_t v){ return par_tab[v&0xFF]; }
 static inline void setszp(uint32_t res,int sz){
     res&=szmask(sz);
     cpu.ZF = res==0; cpu.SF = (res&szsign(sz))!=0; cpu.PF = parity8(res);
@@ -412,6 +416,23 @@ static void op0f(uint32_t eip0){
 static void strop(uint8_t op,int rep){ /* rep: 0 none, 1 repe/rep, 2 repne */
     int sz=(op&1)?opsz:1; int d=cpu.DF?-sz:sz;
     uint32_t cnt = rep? cpu.r[ECX]:1;
+    /* fast paths: rep movs / rep stos going forward, whole range inside guest memory (otherwise fall through to the exact element loop) */
+    if(rep==1 && !cpu.DF && cnt>1 && ((op&0xFE)==0xA4 || (op&0xFE)==0xAA)){
+        uint64_t len=(uint64_t)cnt*(uint64_t)sz, dst=cpu.r[EDI];
+        if((op&0xFE)==0xA4){
+            uint64_t src=cpu.r[ESI];
+            if(src+len<=MEM_SIZE && dst+len<=MEM_SIZE && !(dst>src && dst<src+len)){   /* overlap with dst ahead of src must replicate element by element */
+                memmove(gmem+dst,gmem+src,(size_t)len);
+                cpu.r[ESI]=(uint32_t)(src+len); cpu.r[EDI]=(uint32_t)(dst+len); cpu.r[ECX]=0; return;
+            }
+        } else if(dst+len<=MEM_SIZE){
+            uint32_t v=getreg(sz,EAX); uint8_t *p=gmem+dst;
+            if(sz==1) memset(p,(int)(v&0xFF),(size_t)len);
+            else if(sz==2){ uint16_t w=(uint16_t)v; for(uint32_t i=0;i<cnt;i++) ((uint16_t*)p)[i]=w; }
+            else { for(uint32_t i=0;i<cnt;i++) ((uint32_t*)p)[i]=v; }
+            cpu.r[EDI]=(uint32_t)(dst+len); cpu.r[ECX]=0; return;
+        }
+    }
     while(cnt){
         switch(op&0xFE){
         case 0xA4: wrm(sz,cpu.r[EDI],rdm(sz,cpu.r[ESI])); cpu.r[ESI]+=d; cpu.r[EDI]+=d; break;
@@ -572,9 +593,14 @@ void cpu_run(uint32_t stop_eip){
         if(cpu.eip==THREAD_EXIT_MAGIC){ sched_thread_exit(); continue; }
         if(cpu.eip>=HLE_BASE){ hle_dispatch((cpu.eip-HLE_BASE)>>2); if(g_switch&&g_nest==0){ g_switch=0; sched_switch(); } continue; }
         if(cpu.eip<g_code_lo||cpu.eip>=g_code_hi){ fprintf(stderr,"[BAD EIP] jumped to %08x\n",cpu.eip); fprintf(stderr,"  last EIPs:"); for(int i=40;i>0;i--) fprintf(stderr," %08x",ring[(ringp-i)&255]); fprintf(stderr,"\n  regs EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x\n",cpu.r[0],cpu.r[1],cpu.r[2],cpu.r[3],cpu.r[4],cpu.r[5],cpu.r[6],cpu.r[7]); abort(); }
+        {   /* hot loop: stay here while EIP is plain guest code (HLE / thread-exit addresses are outside [g_code_lo,g_code_hi)) */
+            uint64_t lim=(sched_multi && g_nest==0)? next_slice : ~0ull;
+            do {
         #ifndef RBO_LIBRARY
-        ring[ringp++&255]=cpu.eip;   /* debug trail for crash dumps; skipped in the embedded (iOS) build */
-#endif
-        step(); cpu.icount++;
+                ring[ringp++&255]=cpu.eip;   /* debug trail for crash dumps; skipped in the embedded (iOS) build */
+        #endif
+                step(); cpu.icount++;
+            } while(!cpu.halted && cpu.eip>=g_code_lo && cpu.eip<g_code_hi && cpu.eip!=stop_eip && cpu.icount<lim);
+        }
     }
 }

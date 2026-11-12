@@ -241,7 +241,7 @@ static void h_Sleep(void){
         if(now<*dl){ g_retry=1; return; }
         sched_set_waiting(0); RET(0); return; }
     if(g_fast) vk+=(int)A(0); else hle_sleep_us(A(0)*1000u,0); RET(0); }
-void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else hle_sleep_us(1000,1); }
+void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else hle_sleep_us(250,1); }   /* 250us (was 1000): the guest clock is real time, a shorter nap lets the frame limiter wake closer to its target */
 static void h_GetTickCount(void){ RET(vnow()); }
 static void h_timeGetTime(void){ RET(vnow()); }
 static void h_QueryPerformanceCounter(void){ uint64_t t=now_us()-t0_us; wr32(A(0),(uint32_t)t); wr32(A(0)+4,(uint32_t)(t>>32)); RET(1); }
