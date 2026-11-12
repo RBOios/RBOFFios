@@ -11,6 +11,15 @@ struct LauncherView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            if running == nil {
+                GeometryReader { geo in
+                    Image("Background")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                }.ignoresSafeArea()
+            }
             if let ed = running, let url = gameURL {
                 GameScreen(edition: ed, root: url)
             } else {
@@ -25,8 +34,7 @@ struct LauncherView: View {
 
     private var menu: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("RAGNAROK BATTLE").font(.system(size: 22, weight: .bold)).foregroundColor(.white)
-            ForEach(Edition.allCases) { ed in
+            ForEach(Edition.available) { ed in
                 Button(action: { launch(ed) }) {
                     HStack { Text(ed.title).font(.system(size: 26, weight: .bold)); Text("▶").font(.system(size: 22)) }
                         .foregroundColor(.white)
@@ -37,7 +45,12 @@ struct LauncherView: View {
             Text(folderName.isEmpty ? "게임 폴더가 선택되지 않았어요 (RBO.exe와 DATA 폴더가 있는 곳)" : "폴더: \(folderName)")
                 .font(.footnote).foregroundColor(.gray)
             if !message.isEmpty { Text(message).font(.footnote).foregroundColor(.orange) }
-        }.padding(32)
+        }
+        .padding(24)
+        .background(Color.black.opacity(0.6))
+        .cornerRadius(16)
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
     }
 
     private func saveBookmark(_ url: URL) {

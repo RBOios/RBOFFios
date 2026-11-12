@@ -4,6 +4,8 @@ import Foundation
 enum Edition: String, CaseIterable, Identifiable {
     case original, ex1, ex2, ex3
     var id: String { rawValue }
+    /// Editions shown in the launcher (only Expansion 3 for now).
+    static let available: [Edition] = [.ex3]
     var title: String {
         switch self {
         case .original: return "오리지널"
