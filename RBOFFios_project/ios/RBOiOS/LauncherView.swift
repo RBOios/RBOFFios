@@ -36,7 +36,7 @@ struct LauncherView: View {
         VStack(alignment: .leading, spacing: 18) {
             ForEach(Edition.available) { ed in
                 Button(action: { launch(ed) }) {
-                    HStack { Text(ed.title).font(.system(size: 26, weight: .bold)); Text("▶").font(.system(size: 22)) }
+                    HStack { Text("\(ed.title) 시작하기").font(.system(size: 26, weight: .bold)); Text("▶").font(.system(size: 22)) }
                         .foregroundColor(.white)
                 }
             }

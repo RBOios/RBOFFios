@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// On-screen D-pad + action buttons + PAUSE button.
 /// D-pad -> arrow keys (8 directions), A/S/D/F -> 약 공격 / 강 공격 / 방어 / 특수, PAUSE image -> "1" (Pause).
@@ -26,18 +27,25 @@ struct VirtualPad: View {
             // (on screens with no bar, e.g. iPad, they just stay inside the right edge).
             let barWidth = max((w - gameAspect * h) / 2, 0)
             let clusterCX = min(w - barWidth / 2, w - 0.205 * h)
+            // Everything is sized from the screen height, so on a tablet (about twice as tall as a phone) the pad would be twice as big.
+            // `ui` shrinks the whole touch UI on iPad to roughly the phone's physical size (phones stay at 1).
+            let ui: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? min(1, 400 / h) : 1
+            // Scale the whole action-button cluster so its overall height equals the D-pad's drawn size.
+            let dpadSize = min(dpadFrame.width * w, dpadFrame.height * h) * ui
+            let clusterExtent: CGFloat = 2 * 0.130 + buttonDiameter     // top edge of 특수 to bottom edge of 약 공격, of screen height
+            let k = dpadSize / (clusterExtent * h)
             ZStack {
                 DPad()
-                    .frame(width: dpadFrame.width * w, height: dpadFrame.height * h)
+                    .frame(width: dpadFrame.width * w * ui, height: dpadFrame.height * h * ui)
                     .position(x: dpadFrame.midX * w, y: dpadFrame.midY * h)
                 ForEach(buttons, id: \.label) { b in
                     PadButton(label: b.label, key: b.key, fontScale: 0.30)
-                        .frame(width: buttonDiameter * h, height: buttonDiameter * h)
-                        .position(x: clusterCX + b.dx * h, y: clusterCentreY * h + b.dy * h)
+                        .frame(width: buttonDiameter * h * k, height: buttonDiameter * h * k)
+                        .position(x: clusterCX + b.dx * h * k, y: clusterCentreY * h + b.dy * h * k)
                 }
                 PauseButton(key: DIK.one)
-                    .frame(width: pauseWidth * h)
-                    .position(x: clusterCX, y: pauseTopMargin * h + ((pauseWidth * h - 20) * 0.392 + 20) / 2)   // top right, above the button cluster
+                    .frame(width: pauseWidth * h * ui)
+                    .position(x: clusterCX, y: pauseTopMargin * h + ((pauseWidth * h * ui - 20) * 0.392 + 20) / 2)   // top right, above the button cluster
             }
             .frame(width: w, height: h)
         }
@@ -143,14 +151,15 @@ struct PadButton: View {
         GeometryReader { geo in
             let m = min(geo.size.width, geo.size.height)
             ZStack {
-                Capsule().fill(Color.white.opacity(held ? 0.35 : 0.08))
-                Capsule().stroke(Color.white.opacity(held ? 0.80 : 0.32), lineWidth: 1.5)
+                Capsule().fill(Color.white.opacity(held ? 0.30 : 0.08))
+                Capsule().stroke(Color.white.opacity(held ? 0.80 : 0.32), lineWidth: held ? 3 : 1.5)
+                    .shadow(color: Color.white.opacity(held ? 0.70 : 0), radius: held ? 8 : 0)   // lights up when pressed, like the D-pad
                 Text(label)
                     .font(.system(size: m * fontScale, weight: .bold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
                     .padding(.horizontal, m * 0.08)
-                    .foregroundColor(Color.white.opacity(held ? 1.0 : 0.85))
+                    .foregroundColor(Color.white.opacity(held ? 0.80 : 0.32))   // same as the D-pad (idle 0.32, pressed 0.80)
             }
             .contentShape(Capsule())
             .gesture(DragGesture(minimumDistance: 0)
