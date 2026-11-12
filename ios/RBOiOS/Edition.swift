@@ -2,17 +2,22 @@ import Foundation
 
 /// The four executables that ship with the game folder.
 enum Edition: String, CaseIterable, Identifiable {
-    case ex3
+    case original, ex1, ex2, ex3
     var id: String { rawValue }
     var title: String {
         switch self {
+        case .original: return "오리지널"
+        case .ex1: return "확장팩 1"
+        case .ex2: return "확장팩 2"
         case .ex3: return "확장팩 3"
         }
     }
     var exeName: String {
         switch self {
+        case .original: return "RBO.exe"
+        case .ex1: return "RBO_Ex1.exe"
+        case .ex2: return "RBO_Ex2.exe"
         case .ex3: return "RBO_Ex3.exe"
-        case .ex3: return "rbo_ex3.exe"
         }
     }
 }
