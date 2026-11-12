@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// On-screen analog stick + action buttons + Pause (round).
-/// Look and layout are ported from UnleashedRecomp's touch_controls.cpp (stick, face buttons, START pill).
-/// Stick -> arrow keys, A/S/D/F -> 약 공격 / 강 공격 / 방어 / 특수, "1" -> Pause.
+/// On-screen D-pad + action buttons + PAUSE button.
+/// D-pad -> arrow keys (8 directions), A/S/D/F -> 약 공격 / 강 공격 / 방어 / 특수, PAUSE image -> "1" (Pause).
 struct VirtualPad: View {
-    // Stick frame as fractions of the screen (x, y, width, height), same default as the original layout.
-    private let stickFrame = CGRect(x: 0.055, y: 0.560, width: 0.190, height: 0.315)
+    // D-pad frame as fractions of the screen (x, y, width, height); the pad is drawn as the largest square that fits.
+    private let dpadFrame = CGRect(x: 0.055, y: 0.560, width: 0.190, height: 0.315)
     // Game picture is drawn aspect-fit and centred (Expansion 3 renders 1280x1024); the rest of the screen is black bars.
     private let gameAspect: CGFloat = 1280.0 / 1024.0
     // Round buttons, laid out in a diamond. Units: fractions of the screen height, relative to the cluster centre.
@@ -16,9 +15,9 @@ struct VirtualPad: View {
         ("약 공격", DIK.a,  0.0,     0.130),   // bottom
     ]
     private let buttonDiameter: CGFloat = 0.135   // of screen height
-    private let clusterCentreY: CGFloat = 0.70    // of screen height (moved down a little from 0.6425)
-    private let pauseDiameter: CGFloat = 0.112 * 2.0 / 3.0   // of screen height (1/3 smaller than before)
-    private let pauseTopMargin: CGFloat = 0.06               // gap between Pause and the top edge, of screen height
+    private let clusterCentreY: CGFloat = 0.70    // of screen height
+    private let pauseWidth: CGFloat = 0.20        // PAUSE button width, of screen height (the image keeps its own aspect ratio)
+    private let pauseTopMargin: CGFloat = 0.05    // gap between PAUSE and the top edge, of screen height
 
     var body: some View {
         GeometryReader { geo in
@@ -28,17 +27,17 @@ struct VirtualPad: View {
             let barWidth = max((w - gameAspect * h) / 2, 0)
             let clusterCX = min(w - barWidth / 2, w - 0.205 * h)
             ZStack {
-                AnalogStick()
-                    .frame(width: stickFrame.width * w, height: stickFrame.height * h)
-                    .position(x: stickFrame.midX * w, y: stickFrame.midY * h)
+                DPad()
+                    .frame(width: dpadFrame.width * w, height: dpadFrame.height * h)
+                    .position(x: dpadFrame.midX * w, y: dpadFrame.midY * h)
                 ForEach(buttons, id: \.label) { b in
                     PadButton(label: b.label, key: b.key, fontScale: 0.30)
                         .frame(width: buttonDiameter * h, height: buttonDiameter * h)
                         .position(x: clusterCX + b.dx * h, y: clusterCentreY * h + b.dy * h)
                 }
-                PadButton(label: "Pause", key: DIK.one, fontScale: 0.28)
-                    .frame(width: pauseDiameter * h, height: pauseDiameter * h)
-                    .position(x: clusterCX, y: (pauseTopMargin + pauseDiameter / 2) * h)   // top right, above the button cluster
+                PauseButton(key: DIK.one)
+                    .frame(width: pauseWidth * h)
+                    .position(x: clusterCX, y: pauseTopMargin * h + ((pauseWidth * h - 20) * 0.392 + 20) / 2)   // top right, above the button cluster
             }
             .frame(width: w, height: h)
         }
@@ -46,51 +45,89 @@ struct VirtualPad: View {
     }
 }
 
-/// Floating analog stick: deflection is measured from where the finger first touched.
-struct AnalogStick: View {
-    private static let deadzone: CGFloat = 0.14          // STICK_DEADZONE
-    private static let activationRadius: CGFloat = 0.48  // STICK_ACTIVATION_RADIUS
-    @State private var knob: CGSize = .zero
+/// Four-piece D-pad image (outline only, transparent background). Touch position -> up/down/left/right, diagonals when two sectors overlap.
+struct DPad: View {
+    private struct Dir: Equatable { var l = false, r = false, u = false, d = false }
+    private static let idleOpacity: Double = 0.80     // pieces at rest
+    private static let deadzone: CGFloat = 0.12       // fraction of the pad radius where nothing is pressed
+    private static let sector: CGFloat = 0.38         // sin(22.5 deg): 8-way split
+    @State private var dir = Dir()
 
     var body: some View {
         GeometryReader { geo in
             let size = min(geo.size.width, geo.size.height)
-            let outer = size * Self.activationRadius
-            let knobR = size * 0.14
             ZStack {
-                Circle().fill(Color.white.opacity(0.10))
-                Circle().stroke(Color.white.opacity(0.38), lineWidth: 1.5)
-                ZStack {
-                    Circle().fill(Color.white.opacity(0.18))
-                    Circle().stroke(Color.white.opacity(0.72), lineWidth: 1.5)
-                }
-                .frame(width: knobR * 2, height: knobR * 2)
-                .offset(knob)
+                piece("DPadUp", dir.u)
+                piece("DPadDown", dir.d)
+                piece("DPadLeft", dir.l)
+                piece("DPadRight", dir.r)
             }
             .frame(width: size, height: size)
             .frame(width: geo.size.width, height: geo.size.height)
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { v in
-                    var d = CGSize(width: v.location.x - v.startLocation.x,
-                                   height: v.location.y - v.startLocation.y)
-                    let dist = hypot(d.width, d.height)
-                    if dist > outer && dist > 0 { d.width *= outer / dist; d.height *= outer / dist }
-                    knob = d
-                    let nx = d.width / outer, ny = d.height / outer
-                    let mag = hypot(nx, ny)
-                    if mag < Self.deadzone || mag <= 0 {
-                        PadInput.axis(0, 0)
-                    } else {
-                        let r = min(max((mag - Self.deadzone) / (1 - Self.deadzone), 0), 1)
-                        PadInput.axis(Float(nx / mag * r), Float(-ny / mag * r))   // screen Y is down, pad Y is up
-                    }
+                    update(dx: v.location.x - geo.size.width / 2, dy: v.location.y - geo.size.height / 2, radius: size / 2)
+                }
+                .onEnded { _ in set(Dir()) })
+        }
+    }
+
+    private func piece(_ name: String, _ pressed: Bool) -> some View {
+        Image(name)
+            .resizable()
+            .scaledToFit()
+            .opacity(pressed ? 1.0 : Self.idleOpacity)
+            .brightness(pressed ? 0.30 : 0)
+    }
+
+    private func update(dx: CGFloat, dy: CGFloat, radius: CGFloat) {
+        let dist = hypot(dx, dy)
+        var nd = Dir()
+        if dist > radius * Self.deadzone && dist > 0 {
+            let nx = dx / dist, ny = dy / dist   // screen Y is down
+            nd.l = nx < -Self.sector; nd.r = nx > Self.sector
+            nd.u = ny < -Self.sector; nd.d = ny > Self.sector
+        }
+        set(nd)
+    }
+
+    private func set(_ nd: Dir) {
+        guard nd != dir else { return }
+        dir = nd
+        PadInput.axis(nd.l ? -1 : (nd.r ? 1 : 0), nd.u ? 1 : (nd.d ? -1 : 0))   // pad Y is up
+    }
+}
+
+/// PAUSE image button (transparent background, outline only). Sends the Pause key. A short tap is held for at least 0.1 s so the game never misses it.
+struct PauseButton: View {
+    let key: Int32
+    @State private var held = false
+    @State private var pressedAt = Date()
+    @State private var token = 0
+
+    var body: some View {
+        Image("PauseButton")
+            .resizable()
+            .scaledToFit()
+            .opacity(held ? 1.0 : 0.80)
+            .brightness(held ? 0.30 : 0)
+            .padding(10)                       // bigger touch target than the picture itself
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !held else { return }
+                    held = true; pressedAt = Date(); token += 1
+                    rbo_set_key(key, 1)
                 }
                 .onEnded { _ in
-                    knob = .zero
-                    PadInput.axis(0, 0)
+                    held = false
+                    let id = token
+                    let wait = max(0, 0.10 - Date().timeIntervalSince(pressedAt))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
+                        if token == id { rbo_set_key(key, 0) }   // ignore if pressed again meanwhile
+                    }
                 })
-        }
     }
 }
 

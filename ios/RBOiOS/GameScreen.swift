@@ -59,9 +59,8 @@ struct GameScreen: View {
 
     private func openLog() {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
-        let df = DateFormatter(); df.dateFormat = "yyyyMMdd_HHmmss"
-        let url = docs.appendingPathComponent("rbo_perf_\(df.string(from: Date())).txt")
-        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let url = docs.appendingPathComponent("rbo_perf.txt")          // one fixed file, overwritten each launch
+        FileManager.default.createFile(atPath: url.path, contents: nil)   // creates or truncates
         guard let h = try? FileHandle(forWritingTo: url) else { return }
         logHandle = h; logStart = Date()
         logLine("RBO perf log · \(UIDevice.current.model) · iOS \(UIDevice.current.systemVersion) · \(edition.exeName)")
@@ -106,7 +105,7 @@ struct GameScreen: View {
             _ = rbo_get_prof(&pbuf, Int32(pbuf.count))
             let fullProf = String(cString: pbuf)
             profText = fullProf.split(separator: "\n", omittingEmptySubsequences: false).prefix(7).joined(separator: "\n")
-            // one log line per second: Files 앱 > 내 iPhone > RBO 폴더의 rbo_perf_*.txt
+            // one log line per second: Files 앱 > 내 iPhone > RBO 폴더의 rbo_perf.txt (실행할 때마다 덮어씀)
             let thermal = ProcessInfo.processInfo.thermalState.rawValue      // 0 정상, 1 약간 뜨거움, 2 심함, 3 위험
             let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled ? 1 : 0
             let head = String(format: "t=%d frames=%d fps=%d conv=%.1fms mips=%.0f thermal=%d lowpower=%d | ",
