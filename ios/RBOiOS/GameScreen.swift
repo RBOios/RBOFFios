@@ -6,6 +6,7 @@ import GameController
 enum DIK {
     static let up: Int32 = 0xC8, down: Int32 = 0xD0, left: Int32 = 0xCB, right: Int32 = 0xCD
     static let a: Int32 = 0x1E, s: Int32 = 0x1F, d: Int32 = 0x20, f: Int32 = 0x21
+    static let one: Int32 = 0x02   // Pause
 }
 
 final class EmulatorHost {
