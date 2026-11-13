@@ -89,6 +89,50 @@ static uint32_t convert(Surf*from,Surf*to,uint32_t v){
 typedef struct { int l,t,r,b; } Rc;
 static Rc rect_of(uint32_t p,Surf*s){ Rc r={0,0,s->w,s->h}; if(p){ r.l=(int)rd32(p); r.t=(int)rd32(p+4); r.r=(int)rd32(p+8); r.b=(int)rd32(p+12);} return r; }
 
+
+/* Fast stretch/convert blit for 16/32 bpp. Per-pixel divisions and the generic convert() made large Blts cost milliseconds; this uses a per-column source table,
+   a 64K lookup table for 16bpp sources, and direct shifts for 32bpp sources. Same results as the generic loop. Returns 0 when it does not apply. */
+static int blt_fast(Surf*d,Rc dr,Surf*s,Rc sr,int keyed){
+    if((s->bpp!=16&&s->bpp!=32)||(d->bpp!=16&&d->bpp!=32)) return 0;
+    int dw=dr.r-dr.l, dh=dr.b-dr.t, sw=sr.r-sr.l, sh=sr.b-sr.t;
+    int same=(d->bpp==s->bpp&&d->rmask==s->rmask&&d->gmask==s->gmask&&d->bmask==s->bmask);
+    int mode;   /* 0 raw copy, 1 16bpp LUT, 2 32bpp channel shifts */
+    static uint32_t *lut=NULL; static uint32_t lk[7];
+    int srs=0,sgs=0,sbs=0,drs=0,dgs=0,dbs=0,drn=0,dgn=0,dbn=0;
+    if(same) mode=0;
+    else if(s->bpp==16){
+        uint32_t key[7]={s->rmask,s->gmask,s->bmask,d->rmask,d->gmask,d->bmask,(uint32_t)d->bpp};
+        if(!lut){ lut=malloc(65536*sizeof(uint32_t)); if(!lut) return 0; memset(lk,0xff,sizeof lk); }
+        if(memcmp(lk,key,sizeof key)){ for(uint32_t v=0;v<65536;v++) lut[v]=convert(s,d,v); memcpy(lk,key,sizeof lk); }
+        mode=1;
+    } else {
+        if(mask_bits(s->rmask)!=8||mask_bits(s->gmask)!=8||mask_bits(s->bmask)!=8) return 0;
+        srs=mask_shift(s->rmask); sgs=mask_shift(s->gmask); sbs=mask_shift(s->bmask);
+        drs=mask_shift(d->rmask); dgs=mask_shift(d->gmask); dbs=mask_shift(d->bmask);
+        drn=8-mask_bits(d->rmask); dgn=8-mask_bits(d->gmask); dbn=8-mask_bits(d->bmask);
+        mode=2;
+    }
+    static int *sxm=NULL; static int cap=0;
+    if(dw>cap){ int *n=realloc(sxm,(size_t)dw*sizeof(int)); if(!n) return 0; sxm=n; cap=dw; }
+    int xa=0, xb=dw; if(dr.l<0) xa=-dr.l; if(dr.l+dw>d->w) xb=d->w-dr.l;
+    if(xa>=xb) return 1;
+    for(int x=xa;x<xb;x++){ int sx=sr.l+(int)((int64_t)x*sw/dw); sxm[x]=(sx<0||sx>=s->w)?-1:sx; }
+    const int ckon=keyed&&s->ck_valid; const uint32_t klo=s->ck_lo, khi=s->ck_hi; const int sb=s->bpp/8, db=d->bpp/8;
+    for(int y=0;y<dh;y++){
+        int dy=dr.t+y; if(dy<0||dy>=d->h) continue;
+        int sy=sr.t+(int)((int64_t)y*sh/dh); if(sy<0||sy>=s->h) continue;
+        const uint8_t *sp=gmem+s->pix+(size_t)sy*s->pitch; uint8_t *dp=gmem+d->pix+(size_t)dy*d->pitch+(size_t)(dr.l+xa)*db;
+        for(int x=xa;x<xb;x++,dp+=db){
+            int sx=sxm[x]; if(sx<0) continue;
+            uint32_t v=(sb==2)?*(const uint16_t*)(sp+sx*2):*(const uint32_t*)(sp+sx*4);
+            if(ckon&&v>=klo&&v<=khi) continue;
+            if(mode==1) v=lut[v&0xffff];
+            else if(mode==2) v=((((v>>srs)&255)>>drn)<<drs)|((((v>>sgs)&255)>>dgn)<<dgs)|((((v>>sbs)&255)>>dbn)<<dbs);
+            if(db==2) *(uint16_t*)dp=(uint16_t)v; else *(uint32_t*)dp=v;
+        }
+    }
+    return 1;
+}
 static void do_blt(Surf*d,Rc dr,Surf*s,Rc sr,int keyed){
     int dw=dr.r-dr.l, dh=dr.b-dr.t, sw=sr.r-sr.l, sh=sr.b-sr.t;
     if(dw<=0||dh<=0||sw<=0||sh<=0) return;
@@ -100,6 +144,7 @@ static void do_blt(Surf*d,Rc dr,Surf*s,Rc sr,int keyed){
         for(int y=0;y<dh;y++) memcpy(gmem+d->pix+(size_t)(dr.t+y)*d->pitch+dr.l*bp, gmem+s->pix+(size_t)(sr.t+y)*s->pitch+sr.l*bp, (size_t)dw*bp);
         return;
     }
+    if(blt_fast(d,dr,s,sr,keyed)) return;
     for(int y=0;y<dh;y++){
         int dy=dr.t+y; if(dy<0||dy>=d->h) continue;
         int sy=sr.t+(int)((int64_t)y*sh/dh); if(sy<0||sy>=s->h) continue;
