@@ -46,3 +46,4 @@ extern void (*hle_dispatch)(uint32_t idx);
 extern int g_switch, g_nest;      /* scheduler: request a thread switch / nested guest-call depth */
 void sched_switch(void);
 void sched_thread_exit(void);
+int cpu_prof_report(char *out,int n);   /* hottest guest code blocks of the last second (address + code bytes), for the perf log */
