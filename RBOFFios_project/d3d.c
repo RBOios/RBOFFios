@@ -433,10 +433,10 @@ static void dv_GetCaps(void){ fill_devdesc(A(1)); RET(0); }
 static void dv_EnumTextureFormats(void){
     uint32_t cb=A(1), ctx=A(2); uint32_t pf=ga_alloc(32,1);
     struct { uint32_t fl,bits,r,g,b,a; } f[]={
+        {0x41,32,0xFF0000,0x00FF00,0x0000FF,0xFF000000u},   /* 8888 first: games that take the first alpha format no longer get dithered 4444 */
         {0x41,16,0x0F00,0x00F0,0x000F,0xF000},
         {0x40,16,0xF800,0x07E0,0x001F,0},
         {0x41,16,0x7C00,0x03E0,0x001F,0x8000},
-        {0x41,32,0xFF0000,0x00FF00,0x0000FF,0xFF000000u},
     };
     for(unsigned i=0;i<sizeof f/sizeof *f;i++){
         memset(gmem+pf,0,32); wr32(pf,32); wr32(pf+4,f[i].fl); wr32(pf+12,f[i].bits); wr32(pf+16,f[i].r); wr32(pf+20,f[i].g); wr32(pf+24,f[i].b); wr32(pf+28,f[i].a);
