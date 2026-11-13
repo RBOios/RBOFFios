@@ -47,6 +47,7 @@ struct GameScreen: View {
     @State private var finished = false
     @StateObject private var pad = PadInput()   // physical gamepad; also tells us when to hide the touch pad
     // Performance readout (top-left): frames shown per second and average ms spent converting/handing over each frame.
+    private let showOverlay = false   // 화면 왼쪽 위 성능 표시. true로 바꾸면 다시 보임 (rbo_perf.txt 기록은 이 값과 상관없이 계속됨)
     @State private var statsText = ""
     @State private var profText = ""
     @State private var logHandle: FileHandle? = nil
@@ -74,18 +75,20 @@ struct GameScreen: View {
         ZStack {
             if let host = host { MetalGameView(host: host).ignoresSafeArea() }
             if !pad.controllerConnected { VirtualPad() }   // hidden while a Bluetooth/MFi gamepad is connected
-            VStack {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(statsText)
-                        Text(profText)
+            if showOverlay {
+                VStack {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(statsText)
+                            Text(profText)
+                        }
+                        .font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundColor(.green)
+                        .padding(4).background(Color.black.opacity(0.5)).cornerRadius(4)
+                        Spacer()
                     }
-                    .font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundColor(.green)
-                    .padding(4).background(Color.black.opacity(0.5)).cornerRadius(4)
                     Spacer()
-                }
-                Spacer()
-            }.padding(8).allowsHitTesting(false)
+                }.padding(8).allowsHitTesting(false)
+            }
             if finished {
                 VStack(spacing: 12) {
                     Text("게임이 종료되었어요").foregroundColor(.white)
