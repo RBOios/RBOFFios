@@ -68,6 +68,8 @@ typedef struct {
     int tex_on; const uint32_t *tex; const uint8_t *key; int tw,th,tmask_w,tmask_h; int addr, linear, use_key;
     int cop,aop,ca1,ca2,aa1,aa2; uint32_t tfac;
     uint32_t *exp16; int rmode;   /* destination fast conversion */
+    int prr,pgr,pbr,par,prs,pgs,pbs,pas;   /* packrt shifts (branchless) */
+    int white_ok;                 /* modulate(tex,diffuse) colour+alpha: a white diffuse colour leaves the texel unchanged */
 } RC;
 static RC rc;
 static uint32_t exp16_tab[65536]; static uint32_t exp16_r=0,exp16_g=0,exp16_b=0;
@@ -95,6 +97,13 @@ static void rc_setup(Surf *rt){
         rc.tmask_w=((t->w&(t->w-1))==0)?t->w-1:-1; rc.tmask_h=((t->h&(t->h-1))==0)?t->h-1:-1;
         rc.addr=D.tss[0][12]?D.tss[0][12]:1; rc.linear=(D.tss[0][16]==2||D.rs[17]==2); rc.use_key=D.rs[41]&&t->ck_valid;
     }
+    { const Fmt *f=rc.rf; rc.prr=8-f->rb; rc.pgr=8-f->gb; rc.pbr=8-f->bb; rc.par=8-f->ab; rc.prs=f->rs; rc.pgs=f->gs; rc.pbs=f->bs; rc.pas=f->as; }
+    { int ca1=rc.ca1,ca2=rc.ca2,aa1=rc.aa1,aa2=rc.aa2;
+      #define ISD(x) ((x)!=2&&(x)!=3)
+      int cm = !(rc.cop==2||rc.cop==3||rc.cop==5||rc.cop==6||rc.cop==7) && ((ca1==2&&ISD(ca2))||(ca2==2&&ISD(ca1)));
+      int am = !(rc.aop==1||rc.aop==2||rc.aop==3||rc.aop==5||rc.aop==7) && ((aa1==2&&ISD(aa2))||(aa2==2&&ISD(aa1)));
+      #undef ISD
+      rc.white_ok = cm&&am; }
     if(rt->bpp==16){
         if(exp16_r!=rt->rmask||exp16_g!=rt->gmask||exp16_b!=rt->bmask){
             for(uint32_t v=0;v<65536;v++) exp16_tab[v]=to_argb(rt,v);
@@ -109,29 +118,29 @@ static inline int wrapc(int i,int n,int mask,int addr){
     if(addr==2){ int p=((i%(2*n))+2*n)%(2*n); return p<n?p:2*n-1-p; }
     return mask>=0 ? (i&mask) : (((i%n)+n)%n);
 }
-static inline uint32_t tfetch(int x,int y,int *kill){
-    size_t i=(size_t)y*rc.tw+x; if(rc.use_key&&rc.key[i]) *kill=1; return rc.tex[i];
+static inline uint32_t tfetch2(const RC *r,int x,int y,int *kill){
+    size_t i=(size_t)y*r->tw+x; if(r->use_key&&r->key[i]) *kill=1; return r->tex[i];
 }
-static inline uint32_t tsample(float u,float v,int *kill){
-    float fx=u*rc.tw, fy=v*rc.th; *kill=0;
-    if(!rc.linear){
-        int x=wrapc((int)floorf(fx),rc.tw,rc.tmask_w,rc.addr), y=wrapc((int)floorf(fy),rc.th,rc.tmask_h,rc.addr);
-        return tfetch(x,y,kill);
+static inline uint32_t tsample2(const RC *r,float u,float v,int *kill){
+    float fx=u*r->tw, fy=v*r->th; *kill=0;
+    if(!r->linear){
+        int x=wrapc((int)floorf(fx),r->tw,r->tmask_w,r->addr), y=wrapc((int)floorf(fy),r->th,r->tmask_h,r->addr);
+        return tfetch2(r,x,y,kill);
     }
     fx-=0.5f; fy-=0.5f; int x0=(int)floorf(fx), y0=(int)floorf(fy); float ax=fx-x0, ay=fy-y0;
     if(ax==0.0f&&ay==0.0f){
-        int xa=wrapc(x0,rc.tw,rc.tmask_w,rc.addr), ya=wrapc(y0,rc.th,rc.tmask_h,rc.addr); int k0=0; uint32_t c0=tfetch(xa,ya,&k0);
-        if(rc.use_key){
-            int kc=k0; int xb=wrapc(x0+1,rc.tw,rc.tmask_w,rc.addr), yb=wrapc(y0+1,rc.th,rc.tmask_h,rc.addr);
-            int k1=0,k2=0,k3=0; tfetch(xb,ya,&k1); tfetch(xa,yb,&k2); tfetch(xb,yb,&k3); kc+=k1+k2+k3;
+        int xa=wrapc(x0,r->tw,r->tmask_w,r->addr), ya=wrapc(y0,r->th,r->tmask_h,r->addr); int k0=0; uint32_t c0=tfetch2(r,xa,ya,&k0);
+        if(r->use_key){
+            int kc=k0; int xb=wrapc(x0+1,r->tw,r->tmask_w,r->addr), yb=wrapc(y0+1,r->th,r->tmask_h,r->addr);
+            int k1=0,k2=0,k3=0; tfetch2(r,xb,ya,&k1); tfetch2(r,xa,yb,&k2); tfetch2(r,xb,yb,&k3); kc+=k1+k2+k3;
             if(kc==4) *kill=1;
             if(k0) return 0;
         }
         return c0;
     }
-    int xs[2]={wrapc(x0,rc.tw,rc.tmask_w,rc.addr),wrapc(x0+1,rc.tw,rc.tmask_w,rc.addr)}, ys[2]={wrapc(y0,rc.th,rc.tmask_h,rc.addr),wrapc(y0+1,rc.th,rc.tmask_h,rc.addr)};
+    int xs[2]={wrapc(x0,r->tw,r->tmask_w,r->addr),wrapc(x0+1,r->tw,r->tmask_w,r->addr)}, ys[2]={wrapc(y0,r->th,r->tmask_h,r->addr),wrapc(y0+1,r->th,r->tmask_h,r->addr)};
     int kk=0, kc=0; uint32_t c[4]; int idx=0;
-    for(int j=0;j<2;j++) for(int i=0;i<2;i++){ int k=0; c[idx]=tfetch(xs[i],ys[j],&k); if(k){ kc++; c[idx]=0; } idx++; }
+    for(int j=0;j<2;j++) for(int i=0;i<2;i++){ int k=0; c[idx]=tfetch2(r,xs[i],ys[j],&k); if(k){ kc++; c[idx]=0; } idx++; }
     (void)kk;
     uint32_t w0=(uint32_t)((1-ax)*(1-ay)*256), w1=(uint32_t)(ax*(1-ay)*256), w2=(uint32_t)((1-ax)*ay*256), w3=256-w0-w1-w2; uint32_t o=0;
     for(int ch=0;ch<4;ch++){ uint32_t acc=w0*((c[0]>>(ch*8))&255)+w1*((c[1]>>(ch*8))&255)+w2*((c[2]>>(ch*8))&255)+w3*((c[3]>>(ch*8))&255); o|=((acc+128)>>8)<<(ch*8); }
@@ -139,7 +148,7 @@ static inline uint32_t tsample(float u,float v,int *kill){
     return o;
 }
 static inline uint32_t mul8(uint32_t a,uint32_t b){ uint32_t t=a*b+128; return (t+(t>>8))>>8; }
-static inline uint32_t sel(int a,uint32_t diff,uint32_t tex){ switch(a){ case 2: return tex; case 3: return rc.tfac; default: return diff; } }
+static inline uint32_t sel2(const RC *r,int a,uint32_t diff,uint32_t tex){ switch(a){ case 2: return tex; case 3: return r->tfac; default: return diff; } }
 static inline uint32_t cmodc(uint32_t a,uint32_t b,int sh){
     uint32_t r0=mul8(a&255,b&255)<<sh, r1=mul8((a>>8)&255,(b>>8)&255)<<sh, r2=mul8((a>>16)&255,(b>>16)&255)<<sh, r3=mul8(a>>24,b>>24)<<sh;
     if(r0>255)r0=255; if(r1>255)r1=255; if(r2>255)r2=255; if(r3>255)r3=255; return r0|(r1<<8)|(r2<<16)|(r3<<24);
@@ -150,17 +159,78 @@ static inline int bfac(int f,uint32_t sc,uint32_t dc,int ch){
     switch(f){ case 1:return 0; case 2:return 255; case 3:return s; case 4:return 255-s; case 5:return sa; case 6:return 255-sa; case 7:return da; case 8:return 255-da; case 9:return d; case 10:return 255-d; default:return 255; }
 }
 static inline int acmp2(int fn,int a,int ref){ switch(fn){ case 1:return 0; case 2:return a<ref; case 3:return a==ref; case 4:return a<=ref; case 5:return a>ref; case 6:return a!=ref; case 7:return a>=ref; default:return 1; } }
-static inline uint32_t packrt(uint32_t a){
+static inline uint32_t packrt2(const RC *r,uint32_t a){
+    return (((a>>16)&255)>>r->prr)<<r->prs | (((a>>8)&255)>>r->pgr)<<r->pgs | ((a&255)>>r->pbr)<<r->pbs | ((a>>24)>>r->par)<<r->pas;
+}
+static inline void shade_px2(const RC *r,int x,int y,uint32_t diff,float u,float v){
+    uint32_t col=diff;
+    if(r->tex_on){
+        int kill; uint32_t tx=tsample2(r,u,v,&kill); if(kill) return;
+        if(r->white_ok && diff==0xFFFFFFFFu) col=tx;          /* mul8(255,x)==x (checked exhaustively in test_raster) */
+        else {
+        uint32_t c1=sel2(r,r->ca1,diff,tx), c2=sel2(r,r->ca2,diff,tx), cc;
+        switch(r->cop){ case 2: cc=c1; break; case 3: cc=c2; break; case 5: cc=cmodc(c1,c2,1); break; case 6: cc=cmodc(c1,c2,2); break; case 7: cc=caddc(c1,c2); break; default: cc=cmodc(c1,c2,0); }
+        uint32_t a1=sel2(r,r->aa1,diff,tx)>>24, a2=sel2(r,r->aa2,diff,tx)>>24, aa;
+        switch(r->aop){ case 1: aa=diff>>24; break; case 2: aa=a1; break; case 3: aa=a2; break; case 5: aa=mul8(a1,a2)*2; break; case 7: aa=a1+a2; break; default: aa=mul8(a1,a2); }
+        if(aa>255) aa=255; col=(aa<<24)|(cc&0xFFFFFF);
+        }
+    }
+    if(r->atest && !acmp2(r->afunc,col>>24,r->aref)) return;
+    Surf *rt=r->rt; uint8_t *p=gmem+rt->pix+y*rt->pitch+x*(rt->bpp/8);
+    uint32_t out=col;
+    if(r->blend && !(r->sf==5&&r->df==6&&(col>>24)==255)){        /* opaque source with SRCALPHA/INVSRCALPHA: result == source colour */
+        uint32_t dst = r->rbpp==16 ? r->exp16[*(uint16_t*)p] : to_argb_f(r->rf,*(uint32_t*)p);
+        int sf=r->sf, df=r->df; uint32_t rr=col&0xFF000000u;
+        if(sf==5&&df==6){ uint32_t sa=col>>24, ia=255-sa;
+            for(int ch=0;ch<3;ch++){ uint32_t s=(col>>(ch*8))&255, d=(dst>>(ch*8))&255; uint32_t val=mul8(s,sa)+mul8(d,ia); if(val>255)val=255; rr|=val<<(ch*8); } }
+        else for(int ch=0;ch<3;ch++){ int s=(col>>(ch*8))&255, d=(dst>>(ch*8))&255; int val=(s*bfac(sf,col,dst,ch)+d*bfac(df,col,dst,ch))/255; if(val>255)val=255; rr|=(uint32_t)val<<(ch*8); }
+        out=rr;
+    }
+    uint32_t px=packrt2(r,out);
+    if(r->rbpp==16) *(uint16_t*)p=(uint16_t)px; else if(r->rbpp==32) *(uint32_t*)p=px; else put_raw(rt,x,y,px);
+}
+#ifdef RBO_RASTCHECK
+static inline uint32_t tfetch_ref(int x,int y,int *kill){
+    size_t i=(size_t)y*rc.tw+x; if(rc.use_key&&rc.key[i]) *kill=1; return rc.tex[i];
+}
+static inline uint32_t tsample_ref(float u,float v,int *kill){
+    float fx=u*rc.tw, fy=v*rc.th; *kill=0;
+    if(!rc.linear){
+        int x=wrapc((int)floorf(fx),rc.tw,rc.tmask_w,rc.addr), y=wrapc((int)floorf(fy),rc.th,rc.tmask_h,rc.addr);
+        return tfetch_ref(x,y,kill);
+    }
+    fx-=0.5f; fy-=0.5f; int x0=(int)floorf(fx), y0=(int)floorf(fy); float ax=fx-x0, ay=fy-y0;
+    if(ax==0.0f&&ay==0.0f){
+        int xa=wrapc(x0,rc.tw,rc.tmask_w,rc.addr), ya=wrapc(y0,rc.th,rc.tmask_h,rc.addr); int k0=0; uint32_t c0=tfetch_ref(xa,ya,&k0);
+        if(rc.use_key){
+            int kc=k0; int xb=wrapc(x0+1,rc.tw,rc.tmask_w,rc.addr), yb=wrapc(y0+1,rc.th,rc.tmask_h,rc.addr);
+            int k1=0,k2=0,k3=0; tfetch_ref(xb,ya,&k1); tfetch_ref(xa,yb,&k2); tfetch_ref(xb,yb,&k3); kc+=k1+k2+k3;
+            if(kc==4) *kill=1;
+            if(k0) return 0;
+        }
+        return c0;
+    }
+    int xs[2]={wrapc(x0,rc.tw,rc.tmask_w,rc.addr),wrapc(x0+1,rc.tw,rc.tmask_w,rc.addr)}, ys[2]={wrapc(y0,rc.th,rc.tmask_h,rc.addr),wrapc(y0+1,rc.th,rc.tmask_h,rc.addr)};
+    int kk=0, kc=0; uint32_t c[4]; int idx=0;
+    for(int j=0;j<2;j++) for(int i=0;i<2;i++){ int k=0; c[idx]=tfetch_ref(xs[i],ys[j],&k); if(k){ kc++; c[idx]=0; } idx++; }
+    (void)kk;
+    uint32_t w0=(uint32_t)((1-ax)*(1-ay)*256), w1=(uint32_t)(ax*(1-ay)*256), w2=(uint32_t)((1-ax)*ay*256), w3=256-w0-w1-w2; uint32_t o=0;
+    for(int ch=0;ch<4;ch++){ uint32_t acc=w0*((c[0]>>(ch*8))&255)+w1*((c[1]>>(ch*8))&255)+w2*((c[2]>>(ch*8))&255)+w3*((c[3]>>(ch*8))&255); o|=((acc+128)>>8)<<(ch*8); }
+    if(kc==4) *kill=1;
+    return o;
+}
+static inline uint32_t sel_ref(int a,uint32_t diff,uint32_t tex){ switch(a){ case 2: return tex; case 3: return rc.tfac; default: return diff; } }
+static inline uint32_t packrt_ref(uint32_t a){
     const Fmt *f=rc.rf;
     return (f->rm? ((((a>>16)&255)>>(8-f->rb))<<f->rs):0)|(f->gm? ((((a>>8)&255)>>(8-f->gb))<<f->gs):0)|(f->bm? (((a&255)>>(8-f->bb))<<f->bs):0)|(f->am? (((a>>24)>>(8-f->ab))<<f->as):0);
 }
-static inline void shade_px(int x,int y,uint32_t diff,float u,float v){
+static inline void shade_px_ref(int x,int y,uint32_t diff,float u,float v){
     uint32_t col=diff;
     if(rc.tex_on){
-        int kill; uint32_t tx=tsample(u,v,&kill); if(kill) return;
-        uint32_t c1=sel(rc.ca1,diff,tx), c2=sel(rc.ca2,diff,tx), cc;
+        int kill; uint32_t tx=tsample_ref(u,v,&kill); if(kill) return;
+        uint32_t c1=sel_ref(rc.ca1,diff,tx), c2=sel_ref(rc.ca2,diff,tx), cc;
         switch(rc.cop){ case 2: cc=c1; break; case 3: cc=c2; break; case 5: cc=cmodc(c1,c2,1); break; case 6: cc=cmodc(c1,c2,2); break; case 7: cc=caddc(c1,c2); break; default: cc=cmodc(c1,c2,0); }
-        uint32_t a1=sel(rc.aa1,diff,tx)>>24, a2=sel(rc.aa2,diff,tx)>>24, aa;
+        uint32_t a1=sel_ref(rc.aa1,diff,tx)>>24, a2=sel_ref(rc.aa2,diff,tx)>>24, aa;
         switch(rc.aop){ case 1: aa=diff>>24; break; case 2: aa=a1; break; case 3: aa=a2; break; case 5: aa=mul8(a1,a2)*2; break; case 7: aa=a1+a2; break; default: aa=mul8(a1,a2); }
         if(aa>255) aa=255; col=(aa<<24)|(cc&0xFFFFFF);
     }
@@ -175,9 +245,10 @@ static inline void shade_px(int x,int y,uint32_t diff,float u,float v){
         else for(int ch=0;ch<3;ch++){ int s=(col>>(ch*8))&255, d=(dst>>(ch*8))&255; int val=(s*bfac(sf,col,dst,ch)+d*bfac(df,col,dst,ch))/255; if(val>255)val=255; r|=(uint32_t)val<<(ch*8); }
         out=r;
     }
-    uint32_t px=packrt(out);
+    uint32_t px=packrt_ref(out);
     if(rc.rbpp==16) *(uint16_t*)p=(uint16_t)px; else if(rc.rbpp==32) *(uint32_t*)p=px; else put_raw(rt,x,y,px);
 }
+#endif
 static inline float edge(float ax,float ay,float bx,float by,float px,float py){ return (bx-ax)*(py-ay)-(by-ay)*(px-ax); }
 static int is_tl(float ax,float ay,float bx,float by){ float dx=bx-ax, dy=by-ay; return (dy==0&&dx>0)||dy<0; }
 typedef struct { Vtx a,b,c; float inv,dw0,dw1,dw2; int x0,x1,y0,y1,tl0,tl1,tl2,flat; } TriSetup;
@@ -210,7 +281,7 @@ static inline int narrow_edge(float w,float dw,int x0,int *xs,int *xe){
     return *xs<*xe;
 }
 static void tri_rows(Surf*rt,const TriSetup *t,int ya,int yb){
-    (void)rt;
+    (void)rt; const RC R=rc;      /* local copy: lets the compiler keep the state in registers (stores to the framebuffer may alias the global) */
     const Vtx a=t->a,b=t->b,c=t->c; float inv=t->inv, dw0=t->dw0, dw1=t->dw1, dw2=t->dw2;
     int y0=t->y0>ya?t->y0:ya, y1=t->y1<yb?t->y1:yb;
     for(int y=y0;y<y1;y++){
@@ -227,7 +298,7 @@ static void tri_rows(Surf*rt,const TriSetup *t,int ya,int yb){
                 col=0;
                 for(int ch=0;ch<4;ch++){ float v=l0*((a.col>>(ch*8))&255)+l1*((b.col>>(ch*8))&255)+l2*((c.col>>(ch*8))&255); int iv=(int)(v+0.5f); if(iv>255)iv=255; if(iv<0)iv=0; col|=(uint32_t)iv<<(ch*8); }
             }
-            shade_px(x,y,col,l0*a.u+l1*b.u+l2*c.u,l0*a.v+l1*b.v+l2*c.v);
+            shade_px2(&R,x,y,col,l0*a.u+l1*b.u+l2*c.u,l0*a.v+l1*b.v+l2*c.v);
         }
     }
 }

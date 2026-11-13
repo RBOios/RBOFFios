@@ -11,3 +11,5 @@ test_api: librbo.a test_api.c
 test_hooks: test_hooks.c cpu.c hle.c win.c dx.c d3d.c dshow.c sched.c pe.c hooks.c main.c cpu.h hle.h dxshared.h
 	gcc $(CFLAGS) -Dmain=rboemu_main_unused -c main.c -o main_th.o
 	gcc $(CFLAGS) -o test_hooks test_hooks.c cpu.c hle.c win.c dx.c d3d.c dshow.c sched.c pe.c hooks.c main_th.o -lm
+test_raster: test_raster.c d3d.c dxshared.h hle.h cpu.h
+	gcc -O2 -Wno-unused-function -Wno-misleading-indentation -Wno-unused-variable -o test_raster test_raster.c -lm -Wl,--unresolved-symbols=ignore-all
