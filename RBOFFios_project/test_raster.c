@@ -48,7 +48,7 @@ int main(int argc,char **argv){
             uint8_t snap[4]; memcpy(snap,p,4);
             shade_px_ref(x,y,diff,u,v); uint8_t ra[4]; memcpy(ra,p,4);
             memcpy(p,snap,4);
-            shade_px2(&rc,x,y,diff,u,v); uint8_t rb[4]; memcpy(rb,p,4);
+            shade_px2(&rc,NULL,x,y,diff,u,v); uint8_t rb[4]; memcpy(rb,p,4);
             total++; if(memcmp(ra,rb,4)){ fails++; if(fails<10) printf("MISMATCH it=%d fmt=%d cop=%d aop=%d ca=%d/%d aa=%d/%d blend=%d sf=%d df=%d diff=%08x u=%f v=%f ref=%02x%02x%02x%02x new=%02x%02x%02x%02x\n",it,fi,rc.cop,rc.aop,rc.ca1,rc.ca2,rc.aa1,rc.aa2,rc.blend,rc.sf,rc.df,diff,u,v,ra[0],ra[1],ra[2],ra[3],rb[0],rb[1],rb[2],rb[3]); }
         }
         free(tx->cache); free(tx->keymask);

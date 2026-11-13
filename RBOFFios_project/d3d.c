@@ -65,7 +65,7 @@ static void dev_defaults(void){
 typedef struct {
     Surf *rt; int rbpp; const Fmt *rf;
     int blend, sf, df, atest, afunc, aref;
-    int tex_on; const uint32_t *tex; const uint8_t *key; int tw,th,tmask_w,tmask_h; int addr, linear, use_key;
+    int tex_on; const uint32_t *tex; const uint8_t *key; int tw,th,tmask_w,tmask_h; int addr, linear, minlin, use_key;
     int cop,aop,ca1,ca2,aa1,aa2; uint32_t tfac;
     uint32_t *exp16; int rmode;   /* destination fast conversion */
     int prr,pgr,pbr,par,prs,pgs,pbs,pas;   /* packrt shifts (branchless) */
@@ -95,7 +95,7 @@ static void rc_setup(Surf *rt){
         if(!t->cache_ok) tex_cache_build(t);
         rc.tex_on=1; rc.tex=t->cache; rc.key=t->keymask; rc.tw=t->w; rc.th=t->h;
         rc.tmask_w=((t->w&(t->w-1))==0)?t->w-1:-1; rc.tmask_h=((t->h&(t->h-1))==0)?t->h-1:-1;
-        rc.addr=D.tss[0][12]?D.tss[0][12]:1; rc.linear=(D.tss[0][16]==2||D.rs[17]==2); rc.use_key=D.rs[41]&&t->ck_valid;
+        rc.addr=D.tss[0][12]?D.tss[0][12]:1; rc.linear=(D.tss[0][16]>=2||D.rs[17]>=2); rc.minlin=(D.tss[0][17]>=2||D.rs[18]>=2||rc.linear); rc.use_key=D.rs[41]&&t->ck_valid;
     }
     { const Fmt *f=rc.rf; rc.prr=8-f->rb; rc.pgr=8-f->gb; rc.pbr=8-f->bb; rc.par=8-f->ab; rc.prs=f->rs; rc.pgs=f->gs; rc.pbs=f->bs; rc.pas=f->as; }
     { int ca1=rc.ca1,ca2=rc.ca2,aa1=rc.aa1,aa2=rc.aa2;
@@ -147,6 +147,19 @@ static inline uint32_t tsample2(const RC *r,float u,float v,int *kill){
     if(kc==4) *kill=1;
     return o;
 }
+typedef struct { float dux,duy,dvx,dvy; int n; } SS;
+/* Minification: average n*n bilinear taps spread over the pixel footprint (approximates a mip/area filter). */
+static uint32_t tsample_ss(const RC *r,float u,float v,const SS *ss,int *kill){
+    int n=ss->n, kc=0; uint32_t acc[4]={0,0,0,0};
+    for(int j=0;j<n;j++) for(int i=0;i<n;i++){
+        float ox=(i+0.5f)/n-0.5f, oy=(j+0.5f)/n-0.5f; int k=0;
+        uint32_t c=tsample2(r,u+ox*ss->dux+oy*ss->duy,v+ox*ss->dvx+oy*ss->dvy,&k);
+        if(k){ kc++; c=0; }
+        for(int ch=0;ch<4;ch++) acc[ch]+=(c>>(ch*8))&255;
+    }
+    int cnt=n*n; uint32_t o=0; for(int ch=0;ch<4;ch++) o|=((acc[ch]+cnt/2)/cnt)<<(ch*8);
+    *kill=(kc==cnt); return o;
+}
 static inline uint32_t mul8(uint32_t a,uint32_t b){ uint32_t t=a*b+128; return (t+(t>>8))>>8; }
 static inline uint32_t sel2(const RC *r,int a,uint32_t diff,uint32_t tex){ switch(a){ case 2: return tex; case 3: return r->tfac; default: return diff; } }
 static inline uint32_t cmodc(uint32_t a,uint32_t b,int sh){
@@ -162,10 +175,10 @@ static inline int acmp2(int fn,int a,int ref){ switch(fn){ case 1:return 0; case
 static inline uint32_t packrt2(const RC *r,uint32_t a){
     return (((a>>16)&255)>>r->prr)<<r->prs | (((a>>8)&255)>>r->pgr)<<r->pgs | ((a&255)>>r->pbr)<<r->pbs | ((a>>24)>>r->par)<<r->pas;
 }
-static inline void shade_px2(const RC *r,int x,int y,uint32_t diff,float u,float v){
+static inline void shade_px2(const RC *r,const SS *ss,int x,int y,uint32_t diff,float u,float v){
     uint32_t col=diff;
     if(r->tex_on){
-        int kill; uint32_t tx=tsample2(r,u,v,&kill); if(kill) return;
+        int kill; uint32_t tx=(ss&&ss->n>1)?tsample_ss(r,u,v,ss,&kill):tsample2(r,u,v,&kill); if(kill) return;
         if(r->white_ok && diff==0xFFFFFFFFu) col=tx;          /* mul8(255,x)==x (checked exhaustively in test_raster) */
         else {
         uint32_t c1=sel2(r,r->ca1,diff,tx), c2=sel2(r,r->ca2,diff,tx), cc;
@@ -251,7 +264,7 @@ static inline void shade_px_ref(int x,int y,uint32_t diff,float u,float v){
 #endif
 static inline float edge(float ax,float ay,float bx,float by,float px,float py){ return (bx-ax)*(py-ay)-(by-ay)*(px-ax); }
 static int is_tl(float ax,float ay,float bx,float by){ float dx=bx-ax, dy=by-ay; return (dy==0&&dx>0)||dy<0; }
-typedef struct { Vtx a,b,c; float inv,dw0,dw1,dw2; int x0,x1,y0,y1,tl0,tl1,tl2,flat; } TriSetup;
+typedef struct { Vtx a,b,c; float inv,dw0,dw1,dw2; SS ss; int x0,x1,y0,y1,tl0,tl1,tl2,flat; } TriSetup;
 static TriSetup *tris=NULL; static size_t tris_cap=0, ntris=0;
 static int tri_setup(Surf*rt,Vtx a,Vtx b,Vtx c){
     float area=edge(a.x,a.y,b.x,b.y,c.x,c.y); if(area==0) return 0;
@@ -271,6 +284,17 @@ static int tri_setup(Surf*rt,Vtx a,Vtx b,Vtx c){
     t->x0=x0; t->x1=x1; t->y0=y0; t->y1=y1;
     t->tl0=is_tl(b.x,b.y,c.x,c.y); t->tl1=is_tl(c.x,c.y,a.x,a.y); t->tl2=is_tl(a.x,a.y,b.x,b.y);
     t->flat=(a.col==b.col&&b.col==c.col);
+    t->ss.n=1;
+    if(rc.tex_on && rc.minlin){
+        float k0=t->inv, tw=(float)rc.tw, th=(float)rc.th;
+        float dwx0=t->dw0*k0, dwx1=t->dw1*k0, dwx2=t->dw2*k0;                              /* d(bary)/dx */
+        float dwy0=(c.x-b.x)*k0, dwy1=(a.x-c.x)*k0, dwy2=(b.x-a.x)*k0;                     /* d(bary)/dy */
+        t->ss.dux=dwx0*a.u+dwx1*b.u+dwx2*c.u; t->ss.dvx=dwx0*a.v+dwx1*b.v+dwx2*c.v;
+        t->ss.duy=dwy0*a.u+dwy1*b.u+dwy2*c.u; t->ss.dvy=dwy0*a.v+dwy1*b.v+dwy2*c.v;
+        float fx=fmaxf(fabsf(t->ss.dux*tw),fabsf(t->ss.dvx*th)), fy=fmaxf(fabsf(t->ss.duy*tw),fabsf(t->ss.dvy*th));
+        float m=fmaxf(fx,fy);
+        if(m>1.15f){ int n=(int)ceilf(m); t->ss.n=n>4?4:n; }
+    }
     return 1;
 }
 /* Narrow [*xs,*xe) to the pixels where w + dw*(x-x0) can still be >= 0 (conservative, 1px margin; exact test still runs per pixel). Returns 0 if the row is empty. */
@@ -298,7 +322,7 @@ static void tri_rows(Surf*rt,const TriSetup *t,int ya,int yb){
                 col=0;
                 for(int ch=0;ch<4;ch++){ float v=l0*((a.col>>(ch*8))&255)+l1*((b.col>>(ch*8))&255)+l2*((c.col>>(ch*8))&255); int iv=(int)(v+0.5f); if(iv>255)iv=255; if(iv<0)iv=0; col|=(uint32_t)iv<<(ch*8); }
             }
-            shade_px2(&R,x,y,col,l0*a.u+l1*b.u+l2*c.u,l0*a.v+l1*b.v+l2*c.v);
+            shade_px2(&R,&t->ss,x,y,col,l0*a.u+l1*b.u+l2*c.u,l0*a.v+l1*b.v+l2*c.v);
         }
     }
 }
