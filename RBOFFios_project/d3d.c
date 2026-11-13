@@ -85,6 +85,18 @@ static void tex_cache_build(Surf *t){
     }
     (void)f; t->cache_ok=1;
 }
+#define DG_N 6
+static struct { int bpp,alpha,mag,min,rm,rn; unsigned long n; } dg[DG_N];
+static void dg_note(int bpp,int alpha,int mag,int min,int rm,int rn){
+    for(int i=0;i<DG_N;i++){ if(dg[i].n&&dg[i].bpp==bpp&&dg[i].alpha==alpha&&dg[i].mag==mag&&dg[i].min==min&&dg[i].rm==rm&&dg[i].rn==rn){ dg[i].n++; return; } }
+    int k=0; for(int i=0;i<DG_N;i++){ if(dg[i].n<dg[k].n) k=i; }
+    dg[k].bpp=bpp; dg[k].alpha=alpha; dg[k].mag=mag; dg[k].min=min; dg[k].rm=rm; dg[k].rn=rn; dg[k].n=1;
+}
+int d3d_diag(char *out,int n){
+    int len=0; len+=snprintf(out+len,n-len,"[D3D진단] 텍스처 bpp/알파 | tss16/17 rs17/18 | 횟수\n");
+    for(int i=0;i<DG_N&&len<n-1;i++) if(dg[i].n){ len+=snprintf(out+len,n-len,"  %db a%d | %d/%d %d/%d | %lu\n",dg[i].bpp,dg[i].alpha,dg[i].mag,dg[i].min,dg[i].rm,dg[i].rn,dg[i].n); dg[i].n/=2; }
+    return len;
+}
 static void rc_setup(Surf *rt){
     memset(&rc,0,sizeof rc);
     rc.rt=rt; rc.rbpp=rt->bpp; rc.rf=fmt_of(rt);
@@ -96,6 +108,7 @@ static void rc_setup(Surf *rt){
         rc.tex_on=1; rc.tex=t->cache; rc.key=t->keymask; rc.tw=t->w; rc.th=t->h;
         rc.tmask_w=((t->w&(t->w-1))==0)?t->w-1:-1; rc.tmask_h=((t->h&(t->h-1))==0)?t->h-1:-1;
         rc.addr=D.tss[0][12]?D.tss[0][12]:1; rc.linear=(D.tss[0][16]>=2||D.rs[17]>=2); rc.minlin=(D.tss[0][17]>=2||D.rs[18]>=2||rc.linear); rc.use_key=D.rs[41]&&t->ck_valid;
+        dg_note(t->bpp,t->amask?1:0,D.tss[0][16],D.tss[0][17],D.rs[17],D.rs[18]);
     }
     { const Fmt *f=rc.rf; rc.prr=8-f->rb; rc.pgr=8-f->gb; rc.pbr=8-f->bb; rc.par=8-f->ab; rc.prs=f->rs; rc.pgs=f->gs; rc.pbs=f->bs; rc.pas=f->as; }
     { int ca1=rc.ca1,ca2=rc.ca2,aa1=rc.aa1,aa2=rc.aa2;
@@ -121,10 +134,13 @@ static inline int wrapc(int i,int n,int mask,int addr){
 static inline uint32_t tfetch2(const RC *r,int x,int y,int *kill){
     size_t i=(size_t)y*r->tw+x; if(r->use_key&&r->key[i]) *kill=1; return r->tex[i];
 }
+/* Point sampling: when the sample lands exactly on a texel boundary (half-pixel-offset quads), float noise made neighbouring pixels pick
+   different texels at random (speckled text / gauge edges). A tiny bias resolves every such tie the same way, like exact hardware math. */
+#define TEX_TIE_BIAS 0.004f
 static inline uint32_t tsample2(const RC *r,float u,float v,int *kill){
     float fx=u*r->tw, fy=v*r->th; *kill=0;
     if(!r->linear){
-        int x=wrapc((int)floorf(fx),r->tw,r->tmask_w,r->addr), y=wrapc((int)floorf(fy),r->th,r->tmask_h,r->addr);
+        int x=wrapc((int)floorf(fx+TEX_TIE_BIAS),r->tw,r->tmask_w,r->addr), y=wrapc((int)floorf(fy+TEX_TIE_BIAS),r->th,r->tmask_h,r->addr);
         return tfetch2(r,x,y,kill);
     }
     fx-=0.5f; fy-=0.5f; int x0=(int)floorf(fx), y0=(int)floorf(fy); float ax=fx-x0, ay=fy-y0;
@@ -209,7 +225,7 @@ static inline uint32_t tfetch_ref(int x,int y,int *kill){
 static inline uint32_t tsample_ref(float u,float v,int *kill){
     float fx=u*rc.tw, fy=v*rc.th; *kill=0;
     if(!rc.linear){
-        int x=wrapc((int)floorf(fx),rc.tw,rc.tmask_w,rc.addr), y=wrapc((int)floorf(fy),rc.th,rc.tmask_h,rc.addr);
+        int x=wrapc((int)floorf(fx+TEX_TIE_BIAS),rc.tw,rc.tmask_w,rc.addr), y=wrapc((int)floorf(fy+TEX_TIE_BIAS),rc.th,rc.tmask_h,rc.addr);
         return tfetch_ref(x,y,kill);
     }
     fx-=0.5f; fy-=0.5f; int x0=(int)floorf(fx), y0=(int)floorf(fy); float ax=fx-x0, ay=fy-y0;
