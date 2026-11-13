@@ -23,6 +23,7 @@ targets:
       - path: ../dshow.c
       - path: ../sched.c
       - path: ../pe.c
+      - path: ../hooks.c
       - path: ../main.c
       - path: ../rbo_api.c
       - path: ../cpu.h

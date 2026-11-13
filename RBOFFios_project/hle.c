@@ -43,7 +43,7 @@ uint32_t hle_thunk(int idx){ return HLE_BASE+(uint32_t)idx*4; }
 void hle_dispatch_impl(uint32_t idx){
     if(idx>=(uint32_t)ntab){ fprintf(stderr,"[BAD HLE idx %u] eip=%08x\n",idx,cpu.eip); abort(); }
     HleEntry *e=&tab[idx];
-    if(!e->fn||e->nargs<0){
+    if(!e->fn||e->nargs==-1){
         fprintf(stderr,"[UNIMPLEMENTED] %s!%s called (ret=%08x, esp=%08x)\n",e->dll,e->name,rd32(cpu.r[ESP]),cpu.r[ESP]);
         for(int i=0;i<6;i++) fprintf(stderr,"   arg%d=%08x\n",i,A(i));
         fflush(stderr); abort();
@@ -57,6 +57,7 @@ void hle_dispatch_impl(uint32_t idx){
     { uint64_t dt=now_ns()-pt0, inner=(g_prof_guest_ns-pg0)+(prof_sleep_total()-ps0), own=dt>inner?dt-inner:0;
       if(idx<PROF_MAX){ pf_ns[idx]+=own; pf_calls[idx]++; } g_prof_hle_ns+=own; }
     if(cpu.halted||cpu.eip==THREAD_EXIT_MAGIC) return;
+    if(e->nargs==-2) return;          /* raw hook (hooks.c): the function set ESP/EIP itself */
     if(g_retry){
         if(g_nest>0||sched_nthreads()==1){ /* cannot block here: report timeout instead of spinning */
             if(sched_nthreads()==1){ /* single thread: let virtual time pass so deadlines expire */

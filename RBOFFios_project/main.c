@@ -10,6 +10,8 @@
 #include <limits.h>
 
 uint32_t pe_load(const char *path);
+void rbo_install_hooks(void);
+void rbo_hookcheck_report(void);
 
 void bgm_host_play(const char *path,int volume){ fprintf(stderr,"[bgm] play %s (vol %d)\n",path,volume); }
 void bgm_host_stop(void){ fprintf(stderr,"[bgm] stop\n"); }
@@ -89,6 +91,7 @@ int rbo_run(const char *exe){
     if(gmem==MAP_FAILED){ perror("mmap"); return 1; }
     cpu_init(); hle_init();
     uint32_t entry=pe_load(exe);
+    rbo_install_hooks();
     /* TEB/PEB */
     cpu.fs_base=0x00100000u; wr32(0x00100000u,0xFFFFFFFFu); wr32(0x00100004u,0x1FFFF000u); wr32(0x00100008u,0x1FF00000u);
     wr32(0x00100018u,0x00100000u); wr32(0x00100030u,0x00101000u);
@@ -96,6 +99,7 @@ int rbo_run(const char *exe){
     cpu.eip=entry;
     fprintf(stderr,"[start] entry=%08x\n",entry);
     cpu_run(0xFFFFFFFFu);
+    rbo_hookcheck_report();
     fprintf(stderr,"[end] icount=%llu frames=%d\n",(unsigned long long)cpu.icount,g_frames);
     return 0;
 }
