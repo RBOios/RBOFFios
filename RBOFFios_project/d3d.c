@@ -163,6 +163,10 @@ static inline uint32_t tsample2(const RC *r,float u,float v,int *kill){
     if(kc==4) *kill=1;
     return o;
 }
+/* Optional: average up to 4x4 bilinear taps for minified textures. Costs a lot of CPU in sprite-heavy scenes and the speckle fix does not need it, so it is off. */
+#ifndef RBO_MIN_SUPERSAMPLE
+#define RBO_MIN_SUPERSAMPLE 0
+#endif
 typedef struct { float dux,duy,dvx,dvy; int n; } SS;
 /* Minification: average n*n bilinear taps spread over the pixel footprint (approximates a mip/area filter). */
 static uint32_t tsample_ss(const RC *r,float u,float v,const SS *ss,int *kill){
@@ -301,7 +305,7 @@ static int tri_setup(Surf*rt,Vtx a,Vtx b,Vtx c){
     t->tl0=is_tl(b.x,b.y,c.x,c.y); t->tl1=is_tl(c.x,c.y,a.x,a.y); t->tl2=is_tl(a.x,a.y,b.x,b.y);
     t->flat=(a.col==b.col&&b.col==c.col);
     t->ss.n=1;
-    if(rc.tex_on && rc.minlin){
+    if(RBO_MIN_SUPERSAMPLE && rc.tex_on && rc.minlin){
         float k0=t->inv, tw=(float)rc.tw, th=(float)rc.th;
         float dwx0=t->dw0*k0, dwx1=t->dw1*k0, dwx2=t->dw2*k0;                              /* d(bary)/dx */
         float dwy0=(c.x-b.x)*k0, dwy1=(a.x-c.x)*k0, dwy2=(b.x-a.x)*k0;                     /* d(bary)/dy */
