@@ -19,6 +19,9 @@ struct VirtualPad: View {
     private let clusterCentreY: CGFloat = 0.70    // of screen height
     private let pauseWidth: CGFloat = 0.20        // PAUSE button width, of screen height (the image keeps its own aspect ratio)
     private let pauseTopMargin: CGFloat = 0.05    // gap between PAUSE and the top edge, of screen height
+    private let tabletScale: CGFloat = 1.3        // extra size of the whole touch UI on iPad (1.0 = phone-sized)
+    private let tabletPadScale: CGFloat = 1.3     // iPad only: extra size of the D-pad and the 4 action buttons (PAUSE not included)
+    private let tabletPadDown: CGFloat = 0.07     // iPad only: moves the D-pad and the 4 action buttons down, of screen height
 
     var body: some View {
         GeometryReader { geo in
@@ -28,20 +31,23 @@ struct VirtualPad: View {
             let barWidth = max((w - gameAspect * h) / 2, 0)
             let clusterCX = min(w - barWidth / 2, w - 0.205 * h)
             // Everything is sized from the screen height, so on a tablet (about twice as tall as a phone) the pad would be twice as big.
-            // `ui` shrinks the whole touch UI on iPad to roughly the phone's physical size (phones stay at 1).
-            let ui: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? min(1, 400 / h) : 1
+            // `ui` shrinks the whole touch UI on iPad to roughly the phone's physical size, then `tabletScale` enlarges it (phones stay at 1).
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad
+            let ui: CGFloat = isPad ? min(1, 400 / h) * tabletScale : 1
+            let padUI: CGFloat = isPad ? ui * tabletPadScale : 1        // D-pad + action buttons
+            let down: CGFloat = isPad ? tabletPadDown : 0
             // Scale the whole action-button cluster so its overall height equals the D-pad's drawn size.
-            let dpadSize = min(dpadFrame.width * w, dpadFrame.height * h) * ui
+            let dpadSize = min(dpadFrame.width * w, dpadFrame.height * h) * padUI
             let clusterExtent: CGFloat = 2 * 0.130 + buttonDiameter     // top edge of 특수 to bottom edge of 약 공격, of screen height
             let k = dpadSize / (clusterExtent * h)
             ZStack {
                 DPad()
-                    .frame(width: dpadFrame.width * w * ui, height: dpadFrame.height * h * ui)
-                    .position(x: dpadFrame.midX * w, y: dpadFrame.midY * h)
+                    .frame(width: dpadFrame.width * w * padUI, height: dpadFrame.height * h * padUI)
+                    .position(x: dpadFrame.midX * w, y: (dpadFrame.midY + down) * h)
                 ForEach(buttons, id: \.label) { b in
                     PadButton(label: b.label, key: b.key, fontScale: 0.30)
                         .frame(width: buttonDiameter * h * k, height: buttonDiameter * h * k)
-                        .position(x: clusterCX + b.dx * h * k, y: clusterCentreY * h + b.dy * h * k)
+                        .position(x: clusterCX + b.dx * h * k, y: (clusterCentreY + down) * h + b.dy * h * k)
                 }
                 PauseButton(key: DIK.one)
                     .frame(width: pauseWidth * h * ui)
