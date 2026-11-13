@@ -11,6 +11,8 @@ final class MetalPresenter: NSObject, MTKViewDelegate {
     private var pw = 0, ph = 0
     private var dirty = false
     private let lock = NSLock()
+    /// The game is shown 5:4 (it stretches 640x480 to 1280x1024), whatever size the emulator hands over; the GPU does the scaling.
+    private let displayAspect: Float = 1280.0 / 1024.0
 
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -75,7 +77,7 @@ final class MetalPresenter: NSObject, MTKViewDelegate {
         lock.unlock()
         guard let tex = texture, let drawable = view.currentDrawable, let rpd = view.currentRenderPassDescriptor,
               let cb = queue.makeCommandBuffer(), let enc = cb.makeRenderCommandEncoder(descriptor: rpd) else { return }
-        let va = Float(view.drawableSize.width / max(view.drawableSize.height, 1)), ta = Float(w) / Float(max(h, 1))
+        let va = Float(view.drawableSize.width / max(view.drawableSize.height, 1)), ta = displayAspect
         var scale = va > ta ? SIMD2<Float>(ta / va, 1) : SIMD2<Float>(1, va / ta)
         enc.setRenderPipelineState(pipeline)
         enc.setVertexBytes(&scale, length: MemoryLayout<SIMD2<Float>>.size, index: 0)

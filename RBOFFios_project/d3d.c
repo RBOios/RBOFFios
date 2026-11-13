@@ -154,12 +154,17 @@ static inline uint32_t tsample2(const RC *r,float u,float v,int *kill){
         }
         return c0;
     }
-    int xs[2]={wrapc(x0,r->tw,r->tmask_w,r->addr),wrapc(x0+1,r->tw,r->tmask_w,r->addr)}, ys[2]={wrapc(y0,r->th,r->tmask_h,r->addr),wrapc(y0+1,r->th,r->tmask_h,r->addr)};
+    int xs[2], ys[2];
+    if((unsigned)x0<(unsigned)(r->tw-1) && (unsigned)y0<(unsigned)(r->th-1)){ xs[0]=x0; xs[1]=x0+1; ys[0]=y0; ys[1]=y0+1; }   /* wrapc is the identity here */
+    else { xs[0]=wrapc(x0,r->tw,r->tmask_w,r->addr); xs[1]=wrapc(x0+1,r->tw,r->tmask_w,r->addr); ys[0]=wrapc(y0,r->th,r->tmask_h,r->addr); ys[1]=wrapc(y0+1,r->th,r->tmask_h,r->addr); }
     int kk=0, kc=0; uint32_t c[4]; int idx=0;
     for(int j=0;j<2;j++) for(int i=0;i<2;i++){ int k=0; c[idx]=tfetch2(r,xs[i],ys[j],&k); if(k){ kc++; c[idx]=0; } idx++; }
     (void)kk;
-    uint32_t w0=(uint32_t)((1-ax)*(1-ay)*256), w1=(uint32_t)(ax*(1-ay)*256), w2=(uint32_t)((1-ax)*ay*256), w3=256-w0-w1-w2; uint32_t o=0;
-    for(int ch=0;ch<4;ch++){ uint32_t acc=w0*((c[0]>>(ch*8))&255)+w1*((c[1]>>(ch*8))&255)+w2*((c[2]>>(ch*8))&255)+w3*((c[3]>>(ch*8))&255); o|=((acc+128)>>8)<<(ch*8); }
+    uint32_t w0=(uint32_t)((1-ax)*(1-ay)*256), w1=(uint32_t)(ax*(1-ay)*256), w2=(uint32_t)((1-ax)*ay*256), w3=256-w0-w1-w2;
+    /* two channels per lane pair; the weights sum to 256 so each lane stays below 65536 and nothing carries over (same result as the per-channel loop) */
+    uint32_t rb=(c[0]&0x00FF00FFu)*w0+(c[1]&0x00FF00FFu)*w1+(c[2]&0x00FF00FFu)*w2+(c[3]&0x00FF00FFu)*w3;
+    uint32_t ag=((c[0]>>8)&0x00FF00FFu)*w0+((c[1]>>8)&0x00FF00FFu)*w1+((c[2]>>8)&0x00FF00FFu)*w2+((c[3]>>8)&0x00FF00FFu)*w3;
+    uint32_t o=(((rb+0x00800080u)>>8)&0x00FF00FFu)|((((ag+0x00800080u)>>8)&0x00FF00FFu)<<8);
     if(kc==4) *kill=1;
     return o;
 }
@@ -328,6 +333,58 @@ static void tri_rows(Surf*rt,const TriSetup *t,int ya,int yb){
     (void)rt; const RC R=rc;      /* local copy: lets the compiler keep the state in registers (stores to the framebuffer may alias the global) */
     const Vtx a=t->a,b=t->b,c=t->c; float inv=t->inv, dw0=t->dw0, dw1=t->dw1, dw2=t->dw2;
     int y0=t->y0>ya?t->y0:ya, y1=t->y1<yb?t->y1:yb;
+    /* flat colour, no texture: every pixel gets the same source colour, so the alpha test / SRCALPHA constants are hoisted out of the pixel loop */
+    int fastmode=0; uint32_t fpx=0, ms[3]={0,0,0}, ia=0, fa=0;
+    if(t->flat && !R.tex_on && (R.rbpp==16||R.rbpp==32)){
+        uint32_t col=a.col;
+        if(R.atest && !acmp2(R.afunc,col>>24,R.aref)) return;                 /* constant: every pixel would be rejected */
+        if(!R.blend || (R.sf==5&&R.df==6&&(col>>24)==255)){ fastmode=1; fpx=packrt2(&R,col); }
+        else if(R.sf==5&&R.df==6){ fastmode=2; uint32_t sa=col>>24; ia=255-sa; fa=col&0xFF000000u; for(int ch=0;ch<3;ch++) ms[ch]=mul8((col>>(ch*8))&255,sa); }
+    }
+    for(int y=y0;y<y1;y++){
+        float py=y+0.5f, px0=t->x0+0.5f;
+        float w0=edge(b.x,b.y,c.x,c.y,px0,py), w1=edge(c.x,c.y,a.x,a.y,px0,py), w2=edge(a.x,a.y,b.x,b.y,px0,py);
+        int xs=t->x0, xe=t->x1;
+        if(!narrow_edge(w0,dw0,t->x0,&xs,&xe)||!narrow_edge(w1,dw1,t->x0,&xs,&xe)||!narrow_edge(w2,dw2,t->x0,&xs,&xe)) continue;
+        if(xs>t->x0){ float pxs=xs+0.5f; w0=edge(b.x,b.y,c.x,c.y,pxs,py); w1=edge(c.x,c.y,a.x,a.y,pxs,py); w2=edge(a.x,a.y,b.x,b.y,pxs,py); }
+        if(fastmode){
+            uint8_t *row=gmem+R.rt->pix+(size_t)y*R.rt->pitch;
+            for(int x=xs;x<xe;x++,w0+=dw0,w1+=dw1,w2+=dw2){
+                if(!(w0>0||(w0==0&&t->tl0))||!(w1>0||(w1==0&&t->tl1))||!(w2>0||(w2==0&&t->tl2))) continue;
+                uint32_t px=fpx;
+                if(R.rbpp==16){
+                    uint16_t *p=(uint16_t*)row+x;
+                    if(fastmode==2){ uint32_t dst=R.exp16[*p], rr=fa;
+                        for(int ch=0;ch<3;ch++){ uint32_t val=ms[ch]+mul8((dst>>(ch*8))&255,ia); if(val>255)val=255; rr|=val<<(ch*8); }
+                        px=packrt2(&R,rr); }
+                    *p=(uint16_t)px;
+                } else {
+                    uint32_t *p=(uint32_t*)row+x;
+                    if(fastmode==2){ uint32_t dst=to_argb_f(R.rf,*p), rr=fa;
+                        for(int ch=0;ch<3;ch++){ uint32_t val=ms[ch]+mul8((dst>>(ch*8))&255,ia); if(val>255)val=255; rr|=val<<(ch*8); }
+                        px=packrt2(&R,rr); }
+                    *p=px;
+                }
+            }
+            continue;
+        }
+        for(int x=xs;x<xe;x++,w0+=dw0,w1+=dw1,w2+=dw2){
+            if(!(w0>0||(w0==0&&t->tl0))||!(w1>0||(w1==0&&t->tl1))||!(w2>0||(w2==0&&t->tl2))) continue;
+            float l0=w0*inv,l1=w1*inv,l2=w2*inv;
+            uint32_t col;
+            if(t->flat) col=a.col; else {
+                col=0;
+                for(int ch=0;ch<4;ch++){ float v=l0*((a.col>>(ch*8))&255)+l1*((b.col>>(ch*8))&255)+l2*((c.col>>(ch*8))&255); int iv=(int)(v+0.5f); if(iv>255)iv=255; if(iv<0)iv=0; col|=(uint32_t)iv<<(ch*8); }
+            }
+            shade_px2(&R,&t->ss,x,y,col,l0*a.u+l1*b.u+l2*c.u,l0*a.v+l1*b.v+l2*c.v);
+        }
+    }
+}
+#ifdef RBO_RASTCHECK
+static void tri_rows_ref(Surf*rt,const TriSetup *t,int ya,int yb){
+    (void)rt;       /* local copy: lets the compiler keep the state in registers (stores to the framebuffer may alias the global) */
+    const Vtx a=t->a,b=t->b,c=t->c; float inv=t->inv, dw0=t->dw0, dw1=t->dw1, dw2=t->dw2;
+    int y0=t->y0>ya?t->y0:ya, y1=t->y1<yb?t->y1:yb;
     for(int y=y0;y<y1;y++){
         float py=y+0.5f, px0=t->x0+0.5f;
         float w0=edge(b.x,b.y,c.x,c.y,px0,py), w1=edge(c.x,c.y,a.x,a.y,px0,py), w2=edge(a.x,a.y,b.x,b.y,px0,py);
@@ -342,10 +399,11 @@ static void tri_rows(Surf*rt,const TriSetup *t,int ya,int yb){
                 col=0;
                 for(int ch=0;ch<4;ch++){ float v=l0*((a.col>>(ch*8))&255)+l1*((b.col>>(ch*8))&255)+l2*((c.col>>(ch*8))&255); int iv=(int)(v+0.5f); if(iv>255)iv=255; if(iv<0)iv=0; col|=(uint32_t)iv<<(ch*8); }
             }
-            shade_px2(&R,&t->ss,x,y,col,l0*a.u+l1*b.u+l2*c.u,l0*a.v+l1*b.v+l2*c.v);
+            shade_px_ref(x,y,col,l0*a.u+l1*b.u+l2*c.u,l0*a.v+l1*b.v+l2*c.v);
         }
     }
 }
+#endif
 #define RBO_BANDS 8
 #ifdef RBO_TEST_BANDS
 #define RBO_PAR_MIN_PIXELS 1

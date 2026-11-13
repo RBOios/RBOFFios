@@ -21,7 +21,7 @@ int main(int argc,char **argv){
     gmem=calloc(1,64<<20);
     static const struct{ int bpp; uint32_t r,g,b,a; } F[]={ {16,0xF800,0x07E0,0x001F,0},{16,0x0F00,0x00F0,0x000F,0xF000},{16,0x7C00,0x03E0,0x001F,0x8000},
         {32,0xFF0000,0xFF00,0xFF,0xFF000000u},{32,0xFF0000,0xFF00,0xFF,0},{32,0xFF,0xFF00,0xFF0000,0xFF000000u} };
-    long total=0, fails=0, white_hits=0;
+    long total=0, fails=0, white_hits=0, tri_total=0, tri_fails=0, tri_flat=0;
     for(int it=0;it<iters;it++){
         Surf *rt=&fake[0], *tx=&fake[1]; memset(rt,0,sizeof *rt); memset(tx,0,sizeof *tx);
         int fi=rnd()%6; rt->used=1; rt->w=32; rt->h=32; rt->bpp=F[fi].bpp; rt->pitch=32*(rt->bpp/8); rt->pix=0x1000;
@@ -51,8 +51,24 @@ int main(int argc,char **argv){
             shade_px2(&rc,NULL,x,y,diff,u,v); uint8_t rb[4]; memcpy(rb,p,4);
             total++; if(memcmp(ra,rb,4)){ fails++; if(fails<10) printf("MISMATCH it=%d fmt=%d cop=%d aop=%d ca=%d/%d aa=%d/%d blend=%d sf=%d df=%d diff=%08x u=%f v=%f ref=%02x%02x%02x%02x new=%02x%02x%02x%02x\n",it,fi,rc.cop,rc.aop,rc.ca1,rc.ca2,rc.aa1,rc.aa2,rc.blend,rc.sf,rc.df,diff,u,v,ra[0],ra[1],ra[2],ra[3],rb[0],rb[1],rb[2],rb[3]); }
         }
+        /* whole triangles: tri_rows (optimised, incl. flat-colour fast path) vs tri_rows_ref on identical framebuffers */
+        for(int k=0;k<6;k++){
+            Vtx v3[3]; uint32_t base=rnd(); int flat=rnd()%10<7;
+            for(int i=0;i<3;i++){ v3[i].x=rf(-4,36); v3[i].y=rf(-4,36); v3[i].z=0.5f; v3[i].rhw=1; v3[i].u=rf(-1,2); v3[i].v=rf(-1,2);
+                uint32_t c=flat?base:rnd(); switch(rnd()%4){ case 0: c|=0xFF000000u; break; case 1: c&=0x00FFFFFFu; break; default: break; } v3[i].col=c; }
+            ntris=0; if(!tri_setup(rt,v3[0],v3[1],v3[2])) continue;
+            size_t nb=(size_t)rt->pitch*rt->h;
+            for(size_t i=0;i<nb;i++) gmem[rt->pix+i]=rnd();
+            static uint8_t snapf[32*32*4+64], outr[32*32*4+64]; memcpy(snapf,gmem+rt->pix,nb);
+            tri_rows_ref(rt,&tris[0],0,32); memcpy(outr,gmem+rt->pix,nb);
+            memcpy(gmem+rt->pix,snapf,nb);
+            tri_rows(rt,&tris[0],0,32);
+            tri_total++; if(memcmp(outr,gmem+rt->pix,nb)){ tri_fails++; if(tri_fails<6) printf("TRI MISMATCH it=%d fmt=%d flat=%d blend=%d sf=%d df=%d tex=%d atest=%d\n",it,fi,flat,rc.blend,rc.sf,rc.df,rc.tex_on,rc.atest); }
+            if(flat && !rc.tex_on) tri_flat++;
+        }
         free(tx->cache); free(tx->keymask);
     }
     printf("%ld pixels compared (%ld in white-diffuse fast-path configs), %ld mismatches -> %s\n",total,white_hits*100,fails,fails?"FAILED":"IDENTICAL");
-    return fails?1:0;
+    printf("%ld triangles compared (%ld flat+untextured), %ld mismatches -> %s\n",tri_total,tri_flat,tri_fails,tri_fails?"FAILED":"IDENTICAL");
+    return (fails||tri_fails)?1:0;
 }

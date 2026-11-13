@@ -27,3 +27,13 @@ hooks.c(신규), test_hooks.c(신규), hle.c(nargs==-2 raw 후크), main.c(설�
 - 원본 구현은 `shade_px_ref`로 보존(`-DRBO_RASTCHECK`일 때만 컴파일)
 
 테스트: `make test_raster && ./test_raster 30000` — 원본과 새 구현이 같은 바이트를 쓰는지 무작위 픽셀로 비교
+
+# 2차 래스터 최적화 (최신 소스 기준)
+- 단색(flat) + 텍스처 없음 삼각형: 알파 테스트/SRCALPHA 상수를 픽셀 루프 밖으로 이동 (`tri_rows`의 fastmode)
+- 이중선형 샘플링: 내부 영역은 wrapc 생략, 두 채널씩 묶어 계산(SWAR) — 결과 동일
+- 원본은 `tri_rows_ref`/`shade_px_ref`로 보존(-DRBO_RASTCHECK). `make test_raster`는 픽셀 단위 + 삼각형 단위로 비교
+
+# 네이티브 해상도 표시 (dx.c / MetalPresenter.swift)
+게임이 640x480을 그린 뒤 가짜 창(1280x1024)으로 확대하는 Blt를 1:1 복사로 바꾸고, 확대는 GPU(MetalPresenter)가 5:4 비율로 합니다.
+- CPU의 확대 + 1280x1024 변환(프레임당 약 1.2ms, PC 측정)이 640x480 복사 + 변환(약 0.2ms)으로 줄어듭니다.
+- 런처의 "화면 크기" 선택은 제거했고, 시작할 때마다 게임 설정(SystemConfig.v4)을 640x480으로 맞춥니다.

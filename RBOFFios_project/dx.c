@@ -306,7 +306,14 @@ static void sf_Blt(void){
     Surf *d=surf_of(A(0)); d->cache_ok=0; Rc dr=rect_of(A(1),d); uint32_t flags=A(4), fx=A(5);
     Surf *s=surf_of(A(2));
     if(flags&0x400){ do_fill(d,dr,rd32(fx+80)); }
-    else if(s){ Rc sr=rect_of(A(3),s); do_blt(d,dr,s,sr,(flags&0x8000)!=0); }
+    else if(s){ Rc sr=rect_of(A(3),s);
+        /* Native resolution: the game draws 640x480 and stretches it to the (fake) 1280x1024 window.  Copy 1:1 instead and let the GPU scale the
+           frame (MetalPresenter draws it aspect-fit at the same 5:4 shape), so the CPU neither stretches nor converts 1.3M pixels per frame. */
+        if(d->is_primary && !disp_set){
+            int sw=sr.r-sr.l, sh=sr.b-sr.t;
+            if(sw>0&&sh>0&&((dr.r-dr.l)>sw||(dr.b-dr.t)>sh)){ dr.r=dr.l+sw; dr.b=dr.t+sh; }
+        }
+        do_blt(d,dr,s,sr,(flags&0x8000)!=0); }
     if(d->is_primary){ if(dr.r>dr.l&&dr.b>dr.t){ pr_l=dr.l; pr_t=dr.t; pr_r=dr.r; pr_b=dr.b; } present(); }
     RET(0);
 }
