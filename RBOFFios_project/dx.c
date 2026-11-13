@@ -232,9 +232,9 @@ static void dd_SetDisplayMode(void){ disp_set=1; disp_w=A(1); disp_h=A(2); disp_
 static void dd_GetDisplayMode(void){ Surf t; memset(&t,0,sizeof t); t.w=disp_w;t.h=disp_h;t.bpp=disp_bpp; t.pitch=disp_w*disp_bpp/8; fmt_for_bpp(disp_bpp,&t.rmask,&t.gmask,&t.bmask,&t.amask); fill_desc(A(1),&t,0); RET(0); }
 static void dd_SetCooperativeLevel(void){ fprintf(stderr,"[DDraw] SetCooperativeLevel flags=%08x\n",A(2)); RET(0); }
 static void dd_EnumDisplayModes(void){
-    uint32_t cb=A(4), ctx=A(3); int modes[][3]={{640,480,16},{640,480,32},{800,600,32}};
+    uint32_t cb=A(4), ctx=A(3); int modes[][3]={{640,480,16},{640,480,32},{800,600,16},{800,600,32},{1024,768,16},{1024,768,32}};
     uint32_t d=ga_alloc(128,1);
-    for(int i=0;i<3;i++){
+    for(int i=0;i<(int)(sizeof modes/sizeof modes[0]);i++){
         Surf t; memset(&t,0,sizeof t); t.w=modes[i][0]; t.h=modes[i][1]; t.bpp=modes[i][2]; t.pitch=t.w*t.bpp/8; fmt_for_bpp(t.bpp,&t.rmask,&t.gmask,&t.bmask,&t.amask);
         fill_desc(d,&t,0); uint32_t a[2]={d,ctx}; uint32_t rr=guest_call(cb,2,a); if(rr==0) break;
     }
