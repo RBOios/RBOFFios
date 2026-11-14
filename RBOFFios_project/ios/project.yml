@@ -1,6 +1,6 @@
 name: RBOiOS
 options:
-  bundleIdPrefix: com.example.rbo
+  bundleIdPrefix: com.rboff.ios
   deploymentTarget:
     iOS: "15.0"
 settings:
