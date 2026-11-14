@@ -758,9 +758,11 @@ int cpu_prof_report(char *out,int n){
     return len<n?len:n-1;
 }
 
+extern volatile int g_paused; void hle_pause_wait(void);
 void cpu_run(uint32_t stop_eip){
     while(!cpu.halted){
         if(cpu.eip==stop_eip) return;
+        if(g_paused&&g_nest==0) hle_pause_wait();   /* app is in the background: stand still between two guest instructions */
         if(sched_multi && g_nest==0 && cpu.icount>=next_slice){ next_slice=cpu.icount+131072; sched_switch(); }
         if(cpu.eip==THREAD_EXIT_MAGIC){ sched_thread_exit(); continue; }
         if(cpu.eip>=HLE_BASE){ hle_dispatch((cpu.eip-HLE_BASE)>>2); if(g_switch&&g_nest==0){ g_switch=0; sched_switch(); } continue; }

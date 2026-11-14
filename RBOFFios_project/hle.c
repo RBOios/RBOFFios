@@ -131,6 +131,16 @@ void hle_vsync_advance(void){
     vbase_ms = cur>ideal?cur:ideal; vk=0;
     if(g_trace&&g_frames%300==0) fprintf(stderr,"[clock] frames=%d vtime=%llu ms (ideal %llu ms)\n",g_frames,(unsigned long long)vbase_ms,(unsigned long long)ideal);
 }
+/* Pause (app in the background / control centre): the emulator thread sleeps here, and the guest clock is moved forward by the time spent
+   so that timers, movie and sound do not see a huge jump when it continues. */
+volatile int g_paused=0;
+extern volatile int g_stop_req;
+void hle_pause_wait(void){
+    uint64_t s=now_us(), before=hle_now_us();
+    while(g_paused&&!g_stop_req) usleep(20000);
+    uint64_t d=now_us()-s; t0_us+=d;
+    if(getenv("RBO_PAUSE_DBG")) fprintf(stderr,"[pause] paused %llu ms, guest clock before=%llu after=%llu\n",(unsigned long long)(d/1000),(unsigned long long)before,(unsigned long long)hle_now_us());
+}
 uint64_t hle_now_us(void){ if(g_fast) return vtime_ms()*1000ull; return now_us()-t0_us+10000000ull; }
 static uint32_t vnow(void){ if(g_fast){ vk++; return (uint32_t)vtime_ms(); } return (uint32_t)((now_us()-t0_us)/1000)+10000; }
 

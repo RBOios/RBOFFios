@@ -104,7 +104,12 @@ int rbo_run(const char *exe){
     return 0;
 }
 #ifndef RBO_LIBRARY
+#include <pthread.h>
+/* test aid: RBO_PAUSE_TEST=<ms until pause>:<ms paused> pauses and resumes the emulation from another thread, like the app going to the background */
+static void *pause_test_thread(void *a){ (void)a; int t1=0,t2=0; sscanf(getenv("RBO_PAUSE_TEST"),"%d:%d",&t1,&t2);
+    extern volatile int g_paused; usleep(t1*1000); g_paused=1; usleep(t2*1000); g_paused=0; return NULL; }
 int main(int argc,char**argv){
+    if(getenv("RBO_PAUSE_TEST")){ pthread_t t; pthread_create(&t,NULL,pause_test_thread,NULL); }
     const char *exe=NULL; g_root="/home/claude/game";
     for(int i=1;i<argc;i++){
         if(!strcmp(argv[i],"--root")&&i+1<argc) g_root=argv[++i];

@@ -17,6 +17,11 @@ enum BGM {
         p.play()
     }
 
+    private static var resumeAfterPause = false
+    /// App left the foreground: pause the launcher music and remember whether it was playing.
+    static func suspend() { resumeAfterPause = player?.isPlaying ?? false; player?.pause() }
+    static func resume() { if resumeAfterPause { resumeAfterPause = false; player?.play() } }
+
     static func stop() {
         player?.stop()
         player?.currentTime = 0
