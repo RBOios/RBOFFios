@@ -65,8 +65,18 @@ static void h_SetTimer(void){
     RET(id);
 }
 static void h_KillTimer(void){ for(int i=0;i<16;i++) if(timers[i].active&&timers[i].hwnd==A(0)&&timers[i].id==A(1)) timers[i].active=0; RET(1); }
+/* posted messages (DirectShow's WM_GRAPHNOTIFY etc.); delivered by PeekMessage ahead of timers */
+static struct { uint32_t hwnd,msg,w,l; } pq[16]; static int pq_n=0;
+void win_post_message(uint32_t hwnd,uint32_t msg,uint32_t wp,uint32_t lp){ if(pq_n<16){ pq[pq_n].hwnd=hwnd; pq[pq_n].msg=msg; pq[pq_n].w=wp; pq[pq_n].l=lp; pq_n++; } }
+void dshow_movie_pump(void);
 static void h_PeekMessageA(void){
+    dshow_movie_pump();
     uint64_t now=hle_now_us(); uint32_t msg=A(0);
+    if(pq_n>0){
+        wr32(msg,pq[0].hwnd); wr32(msg+4,pq[0].msg); wr32(msg+8,pq[0].w); wr32(msg+12,pq[0].l); wr32(msg+16,(uint32_t)(now/1000)); wr32(msg+20,0); wr32(msg+24,0);
+        pq_n--; for(int i=0;i<pq_n;i++) pq[i]=pq[i+1];
+        RET(1); return;
+    }
     for(int i=0;i<16;i++) if(timers[i].active&&now>=timers[i].next_us){
         Timer *t=&timers[i]; t->next_us=now+t->interval_us;   /* coalesce missed ticks like Windows */
         wr32(msg,t->hwnd); wr32(msg+4,0x113); wr32(msg+8,t->id); wr32(msg+12,t->proc); wr32(msg+16,(uint32_t)(now/1000)); wr32(msg+20,0); wr32(msg+24,0);

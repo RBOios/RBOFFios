@@ -22,6 +22,9 @@ targets:
       - path: ../d3d.c
       - path: ../gpu_raster.m
       - path: ../dshow.c
+      - path: ../plm_impl.c
+      - path: ../pl_mpeg.h
+        buildPhase: none
       - path: ../sched.c
       - path: ../pe.c
       - path: ../hooks.c

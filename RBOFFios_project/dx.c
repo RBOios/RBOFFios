@@ -212,6 +212,15 @@ void (*g_host_present)(void *ctx,const uint32_t *bgra,int w,int h)=NULL; void *g
 static uint32_t *host_buf=NULL; static size_t host_cap=0;
 static uint32_t hp_lut16[65536]; static uint32_t hp_lut_rm=0,hp_lut_gm=0,hp_lut_bm=0; static int hp_lut_ok=0;
 uint64_t g_stat_present_us=0;      /* total time spent converting + handing frames to the host (for the on-screen stats) */
+/* Hand an already-converted BGRA frame (e.g. a decoded movie frame) to the host. */
+void dx_host_submit(const uint32_t *bgra,int w,int h){
+    if(g_host_present){ uint64_t t0=nowus(); g_host_present(g_host_ctx,bgra,w,h); g_stat_present_us+=nowus()-t0; }
+#ifndef RBO_LIBRARY
+    { static int n=0; const char *dir=getenv("RBO_MOVIE_DUMP");   /* test aid: dump every 150th movie frame as a PPM */
+      if(dir && (n++%150)==0){ char nm[512]; snprintf(nm,sizeof nm,"%s/movie_%05d.ppm",dir,n-1); FILE *f=fopen(nm,"wb");
+        if(f){ fprintf(f,"P6\n%d %d\n255\n",w,h); for(int i=0;i<w*h;i++){ uint32_t v=bgra[i]; fputc((v>>16)&255,f); fputc((v>>8)&255,f); fputc(v&255,f); } fclose(f); } } }
+#endif
+}
 static void host_present(Surf *p,int l,int t,int r,int b){
     int w=r-l, h=b-t; if(w<=0||h<=0) return;
     uint64_t t_start=nowus();
@@ -249,12 +258,14 @@ static void host_present(Surf *p,int l,int t,int r,int b){
     g_stat_present_us+=nowus()-t_start;
 }
 void ds_tick(void);
+int dshow_movie_active(void); void dshow_movie_pump(void);
 static void present(void){
     if(primary_id<0) return;
     Surf *p=&S[primary_id]; gpu_surf_access(p,0);
     g_frames++; hle_vsync_advance(); ds_tick(); sched_frame_boundary(); run_keyscript(); ctl_frame_hook();
     if(g_stop_req){ cpu.halted=1; return; }
-    if(g_host_present && (p->bpp==16||p->bpp==32)){
+    dshow_movie_pump();
+    if(g_host_present && !dshow_movie_active() && (p->bpp==16||p->bpp==32)){   /* a playing movie owns the screen */
         if(!disp_set && pr_r>pr_l && pr_b>pr_t){ int l=pr_l<0?0:pr_l,t=pr_t<0?0:pr_t,r=pr_r>p->w?p->w:pr_r,b=pr_b>p->h?p->h:pr_b; host_present(p,l,t,r,b); }
         else host_present(p,0,0,p->w,p->h);
     }
@@ -469,6 +480,13 @@ int rbo_audio_pull(int16_t *out,int frames){
     for(int i=got;i<frames;i++){ out[2*i]=0; out[2*i+1]=0; }
     return got;
 }
+/* Movie audio (pl_mpeg decodes MP2 in dshow.c): a float FIFO that ds_tick mixes into the DirectSound output so both share one clock. */
+#define MV_FIFO 131072
+static float mv_fifo[MV_FIFO*2]; static uint32_t mv_head=0, mv_tail=0;
+void dx_movie_audio_push(const float *s,int frames){
+    for(int i=0;i<frames;i++){ if(mv_head-mv_tail>=MV_FIFO) break; mv_fifo[(mv_head%MV_FIFO)*2]=s[2*i]; mv_fifo[(mv_head%MV_FIFO)*2+1]=s[2*i+1]; mv_head++; }
+}
+void dx_movie_audio_clear(void){ mv_tail=mv_head; }
 static FILE *g_wav=NULL; static uint32_t g_wav_frames=0; static int wav_init=0;
 static uint64_t last_tick_us=0; static double tick_carry=0;
 static void wav_close(void){
@@ -525,6 +543,7 @@ void ds_tick(void){
                 if(hit) hle_set_event(b->nev[k]); }
         }
     }
+    for(int i=0;i<n && mv_tail!=mv_head;i++,mv_tail++){ acc[2*i]+=mv_fifo[(mv_tail%MV_FIFO)*2]; acc[2*i+1]+=mv_fifo[(mv_tail%MV_FIFO)*2+1]; }
     if(g_audio_ring_on){
         int16_t *o2=malloc(4*(size_t)n);
         for(int i=0;i<2*n;i++){ float v=acc[i]; if(v>1)v=1; if(v<-1)v=-1; o2[i]=(int16_t)(v*32767); }
