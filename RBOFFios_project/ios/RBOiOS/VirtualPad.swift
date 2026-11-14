@@ -22,7 +22,7 @@ struct VirtualPad: View {
     private let tabletScale: CGFloat = 1.3        // extra size of the whole touch UI on iPad (1.0 = phone-sized)
     private let tabletPadScale: CGFloat = 1.3     // iPad only: extra size of the D-pad and the 4 action buttons (PAUSE not included)
     private let tabletPadDown: CGFloat = 0.07     // iPad only: moves the D-pad and the 4 action buttons down, of screen height
-    private let phoneButtonSpread: CGFloat = 1.15  // iPhone only: spacing between the 4 action buttons (1.0 = as before); button size is unchanged
+    private let phoneButtonSpread: CGFloat = 1.15  // spacing between the 4 action buttons on iPhone AND iPad (1.0 = as before); button size is unchanged
     private let phonePadScale: CGFloat = 1.2      // iPhone only: extra size of the D-pad and the 4 action buttons together (the buttons follow the D-pad's size; PAUSE unchanged)
 
     var body: some View {
@@ -42,14 +42,18 @@ struct VirtualPad: View {
             let dpadSize = min(dpadFrame.width * w, dpadFrame.height * h) * padUI
             let clusterExtent: CGFloat = 2 * 0.130 + buttonDiameter     // top edge of 특수 to bottom edge of 약 공격, of screen height
             let k = dpadSize / (clusterExtent * h)
-            let spread: CGFloat = isPad ? 1 : phoneButtonSpread
+            let spread: CGFloat = phoneButtonSpread   // 아이폰과 아이패드 모두 같은 간격 배율
+            // 버튼 사이 빈틈(그리는 원 바깥)을 눌러도 가까운 버튼이 눌리도록, 터치 인식 영역만 이웃 버튼과 겹치기 직전까지 넓힘 (그림 크기는 그대로)
+            let btnD = buttonDiameter * h * k
+            let nearest = CGFloat(hypot(0.1075, 0.130)) * h * k * spread                 // 이웃한 두 버튼 중심 사이 거리
+            let hitExtra = max(0, nearest * 0.48 - btnD / 2)
             ZStack {
                 DPad()
                     .frame(width: dpadFrame.width * w * padUI, height: dpadFrame.height * h * padUI)
                     .position(x: dpadFrame.midX * w, y: (dpadFrame.midY + down) * h)
                 ForEach(buttons, id: \.label) { b in
-                    PadButton(label: b.label, key: b.key, fontScale: 0.30)
-                        .frame(width: buttonDiameter * h * k, height: buttonDiameter * h * k)
+                    PadButton(label: b.label, key: b.key, fontScale: 0.30, hitExtra: hitExtra)
+                        .frame(width: btnD + 2 * hitExtra, height: btnD + 2 * hitExtra)
                         .position(x: clusterCX + b.dx * h * k * spread, y: (clusterCentreY + down) * h + b.dy * h * k * spread)
                 }
                 PauseButton(key: DIK.one)
@@ -148,29 +152,36 @@ struct PauseButton: View {
 }
 
 /// Round button with a text label. A short tap is held for at least 0.1 s so the game never misses it.
+/// `hitExtra`: the touch area is this many points larger than the drawn circle on every side (the drawing stays the same size).
 struct PadButton: View {
     let label: String
     let key: Int32
     var fontScale: CGFloat = 0.30
+    var hitExtra: CGFloat = 0
     @State private var held = false
     @State private var pressedAt = Date()
     @State private var token = 0
 
     var body: some View {
         GeometryReader { geo in
-            let m = min(geo.size.width, geo.size.height)
+            let full = min(geo.size.width, geo.size.height)
+            let m = max(full - 2 * hitExtra, 1)
             ZStack {
-                Capsule().fill(Color.white.opacity(held ? 0.30 : 0.08))
-                Capsule().stroke(Color.white.opacity(held ? 0.80 : 0.32), lineWidth: held ? 3 : 1.5)
-                    .shadow(color: Color.white.opacity(held ? 0.70 : 0), radius: held ? 8 : 0)   // lights up when pressed, like the D-pad
-                Text(label)
-                    .font(.system(size: m * fontScale, weight: .bold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.5)
-                    .padding(.horizontal, m * 0.08)
-                    .foregroundColor(Color.white.opacity(held ? 0.80 : 0.32))   // same as the D-pad (idle 0.32, pressed 0.80)
+                ZStack {
+                    Capsule().fill(Color.white.opacity(held ? 0.30 : 0.08))
+                    Capsule().stroke(Color.white.opacity(held ? 0.80 : 0.32), lineWidth: held ? 3 : 1.5)
+                        .shadow(color: Color.white.opacity(held ? 0.70 : 0), radius: held ? 8 : 0)   // lights up when pressed, like the D-pad
+                    Text(label)
+                        .font(.system(size: m * fontScale, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                        .padding(.horizontal, m * 0.08)
+                        .foregroundColor(Color.white.opacity(held ? 0.80 : 0.32))   // same as the D-pad (idle 0.32, pressed 0.80)
+                }
+                .frame(width: m, height: m)
             }
-            .contentShape(Capsule())
+            .frame(width: geo.size.width, height: geo.size.height)
+            .contentShape(Circle())
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { _ in
                     guard !held else { return }
