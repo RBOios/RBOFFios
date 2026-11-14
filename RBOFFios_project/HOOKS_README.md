@@ -44,3 +44,9 @@ hooks.c(신규), test_hooks.c(신규), hle.c(nargs==-2 raw 후크), main.c(설�
 
 # 640x480 항목의 게임 버퍼 (dx.c)
 원래 이 항목은 1280x1024 버퍼를 만들고 왼쪽 위 640x480에만 그립니다. 버퍼 자체를 640x480으로 만들도록 바꿨습니다(1280x1024 크기의 오프스크린 서피스만 해당, 다른 항목은 그대로). 환경변수 `RBO_NOSHRINK=1`로 끌 수 있습니다. 리눅스 에뮬레이터의 타이틀·데모 전투 화면에서 기존과 같게 나오는 것까지만 확인했습니다.
+
+# 사운드 버퍼 슬롯 반환 (dx.c) — rbo_crash.txt 대응
+`IDirectSoundBuffer::Release`가 아무것도 하지 않아서, 스테이지/전투를 거칠 때마다 사운드 버퍼 슬롯(512개)이 쌓이기만 했습니다. 슬롯이 가득 차면 `SB[-1]`을 건드려 `IDirectSoundBuffer::SetVolume`에서 크래시했습니다(크래시 주소 = `&SB[0] + 200 * 0xFFFFFFFF`).
+- 사운드 버퍼에 참조 카운트를 추가: `CreateSoundBuffer`/`DuplicateSoundBuffer`는 1, `AddRef`/`QueryInterface`(같은 객체)는 +1, `Release`는 -1이고 0이 되면 슬롯과 게임 메모리를 반환합니다(복제본이 같은 데이터를 쓰는 동안은 메모리를 유지).
+- 이미 해제된 버퍼에 대한 `Release`는 무시, 해제된 객체로 들어오는 호출은 `sb_dummy`가 받아서 호스트 크래시가 나지 않습니다.
+- 슬롯이 가득 차면 `E_OUTOFMEMORY`를 돌려주고 로그(`all 512 slots in use`)를 남깁니다.

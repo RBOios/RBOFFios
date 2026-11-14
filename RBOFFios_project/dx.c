@@ -464,6 +464,7 @@ void dx_set_key(int dik,int down){ if(dik>=0&&dik<256) keystate[dik]=down?0x80:0
 #include <math.h>
 typedef struct {
     int used, primary, playing, looping;
+    int refs;                             /* COM reference count; the slot is freed when it reaches 0 */
     uint32_t buf, size;
     int chans, bits, rate, freq;         /* source format, current playback frequency */
     double pos;                           /* play position in bytes as of the last tick */
@@ -501,7 +502,9 @@ static void wav_open(void){
     uint8_t hd[44]={'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,0x44,0xAC,0,0,0x10,0xB1,2,0,4,0,16,0,'d','a','t','a',0,0,0,0};
     fwrite(hd,1,44,g_wav); atexit(wav_close);
 }
-static SBuf *sb_of(uint32_t o){ return &SB[rd32(o+4)]; }
+static SBuf sb_dummy;      /* stand-in for a released/invalid buffer object: harmless to read and write, never played */
+static SBuf *sb_of(uint32_t o){ uint32_t i=rd32(o+4); if(i<512) return &SB[i]; memset(&sb_dummy,0,sizeof sb_dummy); return &sb_dummy; }
+static int sb_alloc_slot(void){ for(int i=0;i<512;i++) if(!SB[i].used) return i; return -1; }
 static double gain_db(int hund){ if(hund<=-10000) return 0.0; if(hund>0) hund=0; return pow(10.0,hund/2000.0); }
 static int bytes_per_frame(SBuf*b){ return b->chans*(b->bits/8); }
 static inline double sample_at(SBuf*b,uint32_t frame,int ch){
@@ -576,8 +579,9 @@ static void dn_SetNotificationPositions(void){
 }
 static void ds_CreateSoundBuffer(void){
     uint32_t d=A(1); uint32_t flags=rd32(d+4), bytes=rd32(d+8), wf=rd32(d+16);
-    int id=-1; for(int i=0;i<512;i++) if(!SB[i].used){id=i;break;}
-    SBuf *b=&SB[id]; memset(b,0,sizeof *b); b->used=1; b->primary=(flags&1)!=0; b->size=bytes;
+    int id=sb_alloc_slot();
+    if(id<0){ fprintf(stderr,"[DSound] CreateSoundBuffer: all 512 slots in use\n"); if(A(2)) wr32(A(2),0); RET(0x8007000Eu /*E_OUTOFMEMORY*/); return; }
+    SBuf *b=&SB[id]; memset(b,0,sizeof *b); b->used=1; b->refs=1; b->primary=(flags&1)!=0; b->size=bytes;
     if(!b->primary&&bytes) b->buf=ga_alloc(bytes,1);
     b->chans=wf?rd16(wf+2):2; b->rate=wf?rd32(wf+4):44100; b->bits=wf?rd16(wf+14):16; if(b->chans<1)b->chans=1; if(b->bits!=8&&b->bits!=16) b->bits=16;
     b->freq=b->rate; b->vol=0; b->pan=0;
@@ -613,6 +617,16 @@ static void dsb_Unlock(void){
         static int cnt=0; if(b->nnotify && cnt++<60) fprintf(stderr,"[DSound] frame %d Unlock id=%d off=%u bytes=%u sum=%llu pos=%.0f play=%d\n",g_frames,(int)(b-SB),p1-b->buf,n1,(unsigned long long)sum,b->pos,b->playing); }
     RET(0);
 }
+static void dsb_AddRef(void){ SBuf *b=sb_of(A(0)); if(b->used) b->refs++; RET(b->used?(uint32_t)b->refs:0u); }
+static void dsb_Release(void){
+    uint32_t o=A(0); SBuf *b=sb_of(o);
+    if(!b->used){ RET(0); return; }                         /* already released: ignore a second Release */
+    if(--b->refs>0){ RET((uint32_t)b->refs); return; }
+    uint32_t buf=b->primary?0:b->buf; b->used=0; b->playing=0; b->nnotify=0; wr32(o+4,0xFFFFFFFFu);   /* later calls on this object hit sb_dummy */
+    if(buf){ int shared=0; for(int i=0;i<512;i++) if(SB[i].used&&SB[i].buf==buf){ shared=1; break; } if(!shared) ga_free(buf); }   /* duplicates share the data */
+    RET(0);
+}
+static void dsb_QI(void){ uint32_t obj=A(0), outp=A(2); com_qi(); if(cpu.r[EAX]==0&&outp&&rd32(outp)==obj){ SBuf *b=sb_of(obj); if(b->used) b->refs++; } }
 static void dsb_SetVolume(void){ SBuf *b=sb_of(A(0)); b->vol=(int)A(1); RET(0); }
 static void dsb_GetVolume(void){ wr32(A(1),(uint32_t)sb_of(A(0))->vol); RET(0); }
 static void dsb_SetPan(void){ SBuf *b=sb_of(A(0)); b->pan=(int)A(1); RET(0); }
@@ -620,7 +634,9 @@ static void dsb_GetPan(void){ wr32(A(1),(uint32_t)sb_of(A(0))->pan); RET(0); }
 static void dsb_SetFrequency(void){ SBuf *b=sb_of(A(0)); uint32_t f=A(1); b->freq=(f==0||f==(uint32_t)-1)?b->rate:(int)f; RET(0); }
 static void dsb_GetFrequency(void){ wr32(A(1),(uint32_t)sb_of(A(0))->freq); RET(0); }
 static void dsb_GetCaps(void){ uint32_t p=A(1); SBuf *b=sb_of(A(0)); memset(gmem+p+4,0,rd32(p)>=20?rd32(p)-4:16); wr32(p+8,b->size); RET(0); }
-static void ds_Duplicate(void){ SBuf *b=sb_of(A(1)); int id=-1; for(int i=0;i<512;i++) if(!SB[i].used){id=i;break;} SB[id]=*b; SB[id].playing=0; SB[id].pos=0;
+static void ds_Duplicate(void){ SBuf *b=sb_of(A(1)); int id=sb_alloc_slot();
+    if(id<0||!b->used){ fprintf(stderr,"[DSound] DuplicateSoundBuffer failed (slots full or bad source)\n"); if(A(2)) wr32(A(2),0); RET(0x8007000Eu); return; }
+    SB[id]=*b; SB[id].playing=0; SB[id].pos=0; SB[id].refs=1;
     uint32_t o=ga_alloc(8,1); wr32(o,vt_dsb); wr32(o+4,id); wr32(A(2),o); RET(0); }
 enum { DS_QI,DS_AddRef,DS_Release,DS_CreateSoundBuffer,DS_GetCaps,DS_DuplicateSoundBuffer,DS_SetCooperativeLevel,DS_Compact,DS_GetSpeakerConfig,DS_SetSpeakerConfig,DS_Initialize,DS_N };
 static const MDef ds_m[DS_N]={{"QueryInterface",3},{"AddRef",1},{"Release",1},{"CreateSoundBuffer",4},{"GetCaps",2},{"DuplicateSoundBuffer",3},{"SetCooperativeLevel",3},{"Compact",1},{"GetSpeakerConfig",2},{"SetSpeakerConfig",2},{"Initialize",2}};
@@ -631,7 +647,7 @@ static void ds_Create(void){ if(!ds_obj){ ds_obj=ga_alloc(8,1); wr32(ds_obj,vt_d
 void dsound_register(void){
     for(int i=0;i<DS_N;i++) ds_impl[i]=com_default; for(int i=0;i<SB_N;i++) sb_impl[i]=com_default;
     ds_impl[DS_QI]=com_qi; ds_impl[DS_AddRef]=com_addref; ds_impl[DS_Release]=com_release; ds_impl[DS_CreateSoundBuffer]=ds_CreateSoundBuffer; ds_impl[DS_DuplicateSoundBuffer]=ds_Duplicate;
-    sb_impl[SB_QI]=com_qi; sb_impl[SB_AddRef]=com_addref; sb_impl[SB_Release]=com_release; sb_impl[SB_Lock]=dsb_Lock; sb_impl[SB_Play]=dsb_Play; sb_impl[SB_Stop]=dsb_Stop;
+    sb_impl[SB_QI]=dsb_QI; sb_impl[SB_AddRef]=dsb_AddRef; sb_impl[SB_Release]=dsb_Release; sb_impl[SB_Lock]=dsb_Lock; sb_impl[SB_Play]=dsb_Play; sb_impl[SB_Stop]=dsb_Stop;
     sb_impl[SB_Unlock]=dsb_Unlock; sb_impl[SB_SetVolume]=dsb_SetVolume; sb_impl[SB_GetVolume]=dsb_GetVolume; sb_impl[SB_SetPan]=dsb_SetPan; sb_impl[SB_GetPan]=dsb_GetPan; sb_impl[SB_SetFrequency]=dsb_SetFrequency; sb_impl[SB_GetFrequency]=dsb_GetFrequency; sb_impl[SB_GetCaps]=dsb_GetCaps;
     sb_impl[SB_GetCurrentPosition]=dsb_GetCurrentPosition; sb_impl[SB_SetCurrentPosition]=dsb_SetCurrentPosition; sb_impl[SB_GetStatus]=dsb_GetStatus;
     static Iface ds={"IDirectSound",DS_N,ds_m,ds_impl}, sb={"IDirectSoundBuffer",SB_N,sb_m,sb_impl};
