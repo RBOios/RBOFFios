@@ -22,6 +22,8 @@ struct VirtualPad: View {
     private let tabletScale: CGFloat = 1.3        // extra size of the whole touch UI on iPad (1.0 = phone-sized)
     private let tabletPadScale: CGFloat = 1.3     // iPad only: extra size of the D-pad and the 4 action buttons (PAUSE not included)
     private let tabletPadDown: CGFloat = 0.07     // iPad only: moves the D-pad and the 4 action buttons down, of screen height
+    private let phoneButtonSpread: CGFloat = 1.15  // iPhone only: spacing between the 4 action buttons (1.0 = as before); button size is unchanged
+    private let phonePadScale: CGFloat = 1.2      // iPhone only: extra size of the D-pad and the 4 action buttons together (the buttons follow the D-pad's size; PAUSE unchanged)
 
     var body: some View {
         GeometryReader { geo in
@@ -34,12 +36,13 @@ struct VirtualPad: View {
             // `ui` shrinks the whole touch UI on iPad to roughly the phone's physical size, then `tabletScale` enlarges it (phones stay at 1).
             let isPad = UIDevice.current.userInterfaceIdiom == .pad
             let ui: CGFloat = isPad ? min(1, 400 / h) * tabletScale : 1
-            let padUI: CGFloat = isPad ? ui * tabletPadScale : 1        // D-pad + action buttons
+            let padUI: CGFloat = isPad ? ui * tabletPadScale : phonePadScale        // D-pad + action buttons
             let down: CGFloat = isPad ? tabletPadDown : 0
             // Scale the whole action-button cluster so its overall height equals the D-pad's drawn size.
             let dpadSize = min(dpadFrame.width * w, dpadFrame.height * h) * padUI
             let clusterExtent: CGFloat = 2 * 0.130 + buttonDiameter     // top edge of 특수 to bottom edge of 약 공격, of screen height
             let k = dpadSize / (clusterExtent * h)
+            let spread: CGFloat = isPad ? 1 : phoneButtonSpread
             ZStack {
                 DPad()
                     .frame(width: dpadFrame.width * w * padUI, height: dpadFrame.height * h * padUI)
@@ -47,7 +50,7 @@ struct VirtualPad: View {
                 ForEach(buttons, id: \.label) { b in
                     PadButton(label: b.label, key: b.key, fontScale: 0.30)
                         .frame(width: buttonDiameter * h * k, height: buttonDiameter * h * k)
-                        .position(x: clusterCX + b.dx * h * k, y: (clusterCentreY + down) * h + b.dy * h * k)
+                        .position(x: clusterCX + b.dx * h * k * spread, y: (clusterCentreY + down) * h + b.dy * h * k * spread)
                 }
                 PauseButton(key: DIK.one)
                     .frame(width: pauseWidth * h * ui)
