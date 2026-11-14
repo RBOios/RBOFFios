@@ -333,21 +333,21 @@ void gpu_rt_read(uint32_t *argb) {
     [g_rt getBytes:argb bytesPerRow:(NSUInteger)g_rtw * 4 fromRegion:MTLRegionMake2D(0, 0, (NSUInteger)g_rtw, (NSUInteger)g_rth) mipmapLevel:0];
 }
 
-void gpu_tex_upload(int id, const uint32_t *argb, const uint8_t *keymask, int w, int h) {
-    if (!g_ok || id < 0 || id >= MAXTEX || w <= 0 || h <= 0) return;
+void gpu_tex_upload(int slot, const uint32_t *argb, const uint8_t *keymask, int w, int h) {
+    if (!g_ok || slot < 0 || slot >= MAXTEX || w <= 0 || h <= 0) return;
     @autoreleasepool {
-        BOOL busy = (g_tex_epoch[id] == g_epoch);                   /* bound by work that has not been submitted yet: must not be overwritten in place */
-        id<MTLTexture> t = g_tex[id];
-        if (!t || (int)t.width != w || (int)t.height != h || busy) { t = make_tex(MTLPixelFormatBGRA8Unorm, w, h); g_tex[id] = t; g_tex_epoch[id] = 0; }
+        BOOL busy = (g_tex_epoch[slot] == g_epoch);                   /* bound by work that has not been submitted yet: must not be overwritten in place */
+        id<MTLTexture> t = g_tex[slot];
+        if (!t || (int)t.width != w || (int)t.height != h || busy) { t = make_tex(MTLPixelFormatBGRA8Unorm, w, h); g_tex[slot] = t; g_tex_epoch[slot] = 0; }
         if (!t) return;
         [t replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)w, (NSUInteger)h) mipmapLevel:0 withBytes:argb bytesPerRow:(NSUInteger)w * 4];
         if (keymask) {
             NSMutableData *md = [NSMutableData dataWithLength:(NSUInteger)w * (NSUInteger)h];
             uint8_t *m = (uint8_t *)[md mutableBytes];
             for (size_t i = 0, n = (size_t)w * (size_t)h; i < n; i++) m[i] = keymask[i] ? 255 : 0;
-            id<MTLTexture> k = g_key[id];
-            if (!k || (int)k.width != w || (int)k.height != h || busy) { k = make_tex(MTLPixelFormatR8Unorm, w, h); g_key[id] = k; }
+            id<MTLTexture> k = g_key[slot];
+            if (!k || (int)k.width != w || (int)k.height != h || busy) { k = make_tex(MTLPixelFormatR8Unorm, w, h); g_key[slot] = k; }
             if (k) [k replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)w, (NSUInteger)h) mipmapLevel:0 withBytes:m bytesPerRow:(NSUInteger)w];
-        } else g_key[id] = nil;
+        } else g_key[slot] = nil;
     }
 }
