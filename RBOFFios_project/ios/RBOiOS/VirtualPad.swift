@@ -69,22 +69,32 @@ struct VirtualPad: View {
 
 /// Four-piece D-pad (PPSSPP arrows: outline + a filled arrow that lights up while pressed; transparent background). Touch position -> up/down/left/right, diagonals when two sectors overlap.
 struct DPad: View {
-    private struct Dir: Equatable { var l = false, r = false, u = false, d = false }
+    private struct Dir: Equatable {
+        var l = false, r = false, u = false, d = false
+        subscript(i: Int) -> Bool {
+            get { [l, r, u, d][i] }
+            set { switch i { case 0: l = newValue; case 1: r = newValue; case 2: u = newValue; default: d = newValue } }
+        }
+    }
+    private static let minLit: TimeInterval = 0.18    // 방향을 빨리 떼도 불빛은 최소 이만큼 유지
     private static let idleOpacity: Double = 0.32     // pieces at rest (same as the action-button outline)
     private static let pressedOpacity: Double = 0.80  // pressed (same as the action buttons)
     private static let glowOpacity: Double = 0.50     // PPSSPP "glow": the filled arrow lights up behind the outline while pressed
     private static let deadzone: CGFloat = 0.12       // fraction of the pad radius where nothing is pressed
     private static let sector: CGFloat = 0.38         // sin(22.5 deg): 8-way split
-    @State private var dir = Dir()
+    @State private var dir = Dir()                  // 실제 눌린 방향 (게임 입력)
+    @State private var lit = Dir()                  // 화면에 불 켜진 방향 (최소 유지 시간 적용)
+    @State private var pressedAt = [Date](repeating: Date(), count: 4)
+    @State private var tokens = [Int](repeating: 0, count: 4)
 
     var body: some View {
         GeometryReader { geo in
             let size = min(geo.size.width, geo.size.height)
             ZStack {
-                piece("DPadUp", 0, dir.u)
-                piece("DPadDown", 180, dir.d)
-                piece("DPadLeft", 270, dir.l)
-                piece("DPadRight", 90, dir.r)
+                piece("DPadUp", 0, lit.u)
+                piece("DPadDown", 180, lit.d)
+                piece("DPadLeft", 270, lit.l)
+                piece("DPadRight", 90, lit.r)
             }
             .frame(width: size, height: size)
             .frame(width: geo.size.width, height: geo.size.height)
@@ -121,7 +131,19 @@ struct DPad: View {
 
     private func set(_ nd: Dir) {
         guard nd != dir else { return }
+        let old = dir
         dir = nd
+        for i in 0..<4 {
+            if nd[i] && !old[i] {
+                lit[i] = true; pressedAt[i] = Date(); tokens[i] += 1
+            } else if !nd[i] && old[i] {
+                let id = tokens[i]
+                let wait = max(0, Self.minLit - Date().timeIntervalSince(pressedAt[i]))
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
+                    if tokens[i] == id && !dir[i] { lit[i] = false }   // 그 사이 다시 눌렸으면 끄지 않음
+                }
+            }
+        }
         PadInput.axis(nd.l ? -1 : (nd.r ? 1 : 0), nd.u ? 1 : (nd.d ? -1 : 0))   // pad Y is up
     }
 }
