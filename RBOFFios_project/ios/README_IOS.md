@@ -17,7 +17,7 @@ Locally: `cd ios && xcodegen generate && open RBOiOS.xcodeproj`.
 
 ## Known limits
 - The engine keeps global state: **one edition per app launch**. To switch edition, quit and relaunch the app.
-- Rendering is currently the CPU rasterizer; Metal only displays the finished frame. Heavy scenes (esp. Ex3 at 1280x1024) may not hold 60 fps on every device. A GPU path would replace `d3d.c`'s rasterizer.
+- Rendering: 3D is drawn by a Metal rasterizer (`gpu_raster.m`), with the CPU rasterizer (`d3d.c`) as fallback (the GPU path is on by default and untested on a device). Put an empty `rbo_gpu_off.txt` in the game folder to force the CPU path, or `rbo_gpu_auto.txt` to switch automatically by scene size. Check the `[GPU]` lines in the perf log (`rbo_perf`).
 - Guest memory is a 512 MB `mmap` (lazily committed); not tested against iOS memory limits.
 - The opening movie (DirectShow) is not supported; the game shows no movie and continues.
 - Real-time audio is pulled from a ring buffer; underruns produce silence/glitches if emulation falls below real time.

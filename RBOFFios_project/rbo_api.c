@@ -41,4 +41,5 @@ void rbo_get_stats(int *frames,double *present_ms_total){ if(frames) *frames=g_f
 void rbo_get_stats2(int *frames,double *present_ms_total,double *idle_ms_total,uint64_t *guest_instructions){
     rbo_get_stats(frames,present_ms_total); if(idle_ms_total) *idle_ms_total=(double)g_stat_idle_us/1000.0; if(guest_instructions) *guest_instructions=cpu.icount;
 }
-int rbo_get_prof(char *out,int n){ if(!out||n<=0) return 0; out[0]=0; int len=hle_prof_report(out,n,12); if(len<0) len=0; if(len<n-1){ len+=cpu_prof_report(out+len,n-len); } return len<n?len:n-1; }
+int d3d_gpu_report(char *out,int n);
+int rbo_get_prof(char *out,int n){ if(!out||n<=0) return 0; out[0]=0; int len=hle_prof_report(out,n,12); if(len<0) len=0; if(len<n-1){ len+=d3d_gpu_report(out+len,n-len); } if(len<n-1){ len+=cpu_prof_report(out+len,n-len); } return len<n?len:n-1; }

@@ -13,3 +13,7 @@ test_hooks: test_hooks.c cpu.c hle.c win.c dx.c d3d.c dshow.c sched.c pe.c hooks
 	gcc $(CFLAGS) -o test_hooks test_hooks.c cpu.c hle.c win.c dx.c d3d.c dshow.c sched.c pe.c hooks.c main_th.o -lm
 test_raster: test_raster.c d3d.c dxshared.h hle.h cpu.h
 	gcc -O2 -Wno-unused-function -Wno-misleading-indentation -Wno-unused-variable -o test_raster test_raster.c -lm -Wl,--unresolved-symbols=ignore-all
+test_resolve: test_resolve.c hle.c hle.h cpu.h
+	gcc -O2 -Wno-unused-function -Wno-misleading-indentation -Wno-unused-variable -o test_resolve test_resolve.c -lm -Wl,--unresolved-symbols=ignore-all
+test_gpu: test_gpu.c gpu_stub.c d3d.c gpu_raster.h dxshared.h hle.h cpu.h
+	gcc -O2 -DRBO_GPU -Wno-unused-function -Wno-misleading-indentation -Wno-unused-variable -o test_gpu test_gpu.c gpu_stub.c -lm -Wl,--unresolved-symbols=ignore-all

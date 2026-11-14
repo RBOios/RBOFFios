@@ -56,7 +56,7 @@ static void fmt_for_bpp(int bpp,uint32_t*r,uint32_t*g,uint32_t*b,uint32_t*a){
 static int new_surface(int w,int h,int bpp,uint32_t r,uint32_t g,uint32_t b,uint32_t a,uint32_t *objout){
     int id=-1; for(int i=0;i<MAXS;i++) if(!S[i].used){id=i;break;}
     if(id<0){ fprintf(stderr,"[DDraw] out of surfaces\n"); abort(); }
-    Surf *s=&S[id]; memset(s,0,sizeof *s); s->used=1; s->w=w; s->h=h; s->bpp=bpp;
+    Surf *s=&S[id]; gpu_surf_release(s); memset(s,0,sizeof *s); s->id=id; s->used=1; s->w=w; s->h=h; s->bpp=bpp;
     s->pitch=((w*(bpp/8))+3)&~3; s->pix=ga_alloc(s->pitch*h+16,1);
     s->rmask=r; s->gmask=g; s->bmask=b; s->amask=a; s->back_id=-1;
     s->obj=ga_alloc(8,1); wr32(s->obj,vt_surf); wr32(s->obj+4,id);
@@ -182,7 +182,7 @@ void dx_script_add(int rel,int dik,int down){ if(nks<256){ kscript[nks].frame=g_
 void dx_script_clear(void){ nks=0; }
 void dx_set_dump_every(int n){ g_dump_every=n; }
 void present_frame_file(const char *path,const uint8_t *pix,int w,int h,int pitch,int bpp,uint32_t rm,uint32_t gm,uint32_t bm);
-void dx_dump_primary(const char *path){ if(primary_id<0) return; Surf *p=&S[primary_id]; present_frame_file(path,gmem+p->pix,p->w,p->h,p->pitch,p->bpp,p->rmask,p->gmask,p->bmask); }
+void dx_dump_primary(const char *path){ if(primary_id<0) return; Surf *p=&S[primary_id]; gpu_surf_access(p,0); present_frame_file(path,gmem+p->pix,p->w,p->h,p->pitch,p->bpp,p->rmask,p->gmask,p->bmask); }
 void (*g_host_present)(void *ctx,const uint32_t *bgra,int w,int h)=NULL; void *g_host_ctx=NULL; volatile int g_stop_req=0;
 static uint32_t *host_buf=NULL; static size_t host_cap=0;
 static uint32_t hp_lut16[65536]; static uint32_t hp_lut_rm=0,hp_lut_gm=0,hp_lut_bm=0; static int hp_lut_ok=0;
@@ -226,7 +226,7 @@ static void host_present(Surf *p,int l,int t,int r,int b){
 void ds_tick(void);
 static void present(void){
     if(primary_id<0) return;
-    Surf *p=&S[primary_id];
+    Surf *p=&S[primary_id]; gpu_surf_access(p,0);
     g_frames++; hle_vsync_advance(); ds_tick(); sched_frame_boundary(); run_keyscript(); ctl_frame_hook();
     if(g_stop_req){ cpu.halted=1; return; }
     if(g_host_present && (p->bpp==16||p->bpp==32)){
@@ -299,12 +299,13 @@ static void dd_WaitForVerticalBlank(void){
 
 static void sf_GetAttachedSurface(void){ Surf *s=surf_of(A(0)); if(s&&s->back_id>=0){ wr32(A(2),S[s->back_id].obj); RET(0);} else { wr32(A(2),0); RET(0x887602ACu /*DDERR_NOTFOUND*/);} }
 static void sf_Flip(void){
-    Surf *s=surf_of(A(0)); if(s&&s->back_id>=0){ Surf *b=&S[s->back_id]; memcpy(gmem+s->pix,gmem+b->pix,s->pitch*s->h); }
+    Surf *s=surf_of(A(0)); if(s&&s->back_id>=0){ Surf *b=&S[s->back_id]; gpu_surf_access(b,0); gpu_surf_access(s,1); memcpy(gmem+s->pix,gmem+b->pix,s->pitch*s->h); }
     present(); RET(0);
 }
 static void sf_Blt(void){
     Surf *d=surf_of(A(0)); d->cache_ok=0; Rc dr=rect_of(A(1),d); uint32_t flags=A(4), fx=A(5);
     Surf *s=surf_of(A(2));
+    gpu_surf_access(d,1); if(s&&s!=d) gpu_surf_access(s,0);
     if(flags&0x400){ do_fill(d,dr,rd32(fx+80)); }
     else if(s){ Rc sr=rect_of(A(3),s);
         /* Native resolution: the game draws 640x480 and stretches it to the (fake) 1280x1024 window.  Copy 1:1 instead and let the GPU scale the
@@ -319,11 +320,12 @@ static void sf_Blt(void){
 }
 static void sf_BltFast(void){
     Surf *d=surf_of(A(0)); d->cache_ok=0; int x=(int)A(1), y=(int)A(2); Surf *s=surf_of(A(3)); Rc sr=rect_of(A(4),s); uint32_t tr=A(5);
+    gpu_surf_access(d,1); if(s!=d) gpu_surf_access(s,0);
     Rc dr={x,y,x+(sr.r-sr.l),y+(sr.b-sr.t)};
     do_blt(d,dr,s,sr,(tr&1)!=0); if(d->is_primary) present(); RET(0);
 }
 static void sf_Lock(void){
-    Surf *s=surf_of(A(0)); uint32_t rc=A(1), d=A(2); fill_desc(d,s,1);
+    Surf *s=surf_of(A(0)); uint32_t rc=A(1), d=A(2); gpu_surf_access(s,1); fill_desc(d,s,1);
     if(rc){ Rc r=rect_of(rc,s); wr32(d+36,s->pix+r.t*s->pitch+r.l*(s->bpp/8)); }
     s->locked=1; s->cache_ok=0; RET(0);
 }

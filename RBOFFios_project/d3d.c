@@ -1,9 +1,16 @@
 /* Direct3D 7 HLE with a small software rasterizer (reference implementation for validation) */
 #include "dxshared.h"
+#if defined(__APPLE__) && !defined(RBO_NO_GPU) && !defined(RBO_GPU)
+#define RBO_GPU 1
+#endif
+#ifdef RBO_GPU
+#include "gpu_raster.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
 #ifdef __APPLE__
 #include <dispatch/dispatch.h>
 #include <sys/qos.h>
@@ -75,6 +82,7 @@ static RC rc;
 static uint32_t exp16_tab[65536]; static uint32_t exp16_r=0,exp16_g=0,exp16_b=0;
 
 static void tex_cache_build(Surf *t){
+    gpu_surf_access(t,0);          /* the texture may be the render target the GPU is still drawing into */
     size_t n=(size_t)t->w*t->h;
     if(t->cache_cap<(int)n){ free(t->cache); free(t->keymask); t->cache=malloc(n*4); t->keymask=malloc(n); t->cache_cap=(int)n; }
     const Fmt *f=fmt_of(t);
@@ -83,7 +91,7 @@ static void tex_cache_build(Surf *t){
         t->cache[i]=to_argb(t,raw);
         t->keymask[i]=(t->ck_valid&&raw>=t->ck_lo&&raw<=t->ck_hi);
     }
-    (void)f; t->cache_ok=1;
+    (void)f; t->cache_ok=1; t->cgen++;
 }
 #define DG_N 6
 static struct { int bpp,alpha,mag,min,rm,rn; unsigned long n; } dg[DG_N];
@@ -451,6 +459,154 @@ static void read_vtx(uint32_t p,uint32_t fvf,Vtx *v){
     if(fvf&0x80) o+=4;
     if(((fvf>>8)&15)>=1){ v->u=*(float*)(gmem+o); v->v=*(float*)(gmem+o+4); }
 }
+
+/* ---------- GPU rasterizer routing (Metal, see gpu_raster.h) ----------
+   The render target stays resident on the GPU between draws.  CPU code that touches a surface calls gpu_surf_access() first, which reads the
+   GPU copy back when it is newer; after the CPU wrote, the GPU copy is stale and is re-uploaded before the next GPU draw.
+   Per frame we count how many triangle pixels were drawn: only scenes big enough to pay for the upload/readback go to the GPU, and a game that
+   keeps interleaving CPU blits with draws (many round trips per frame) is sent back to the CPU rasterizer for a while. */
+#ifdef RBO_GPU
+#define GPU_FRAME_MIN_PX 120000L     /* bounding-box pixels drawn in the previous frame before the GPU is used */
+#define GPU_MAX_TRIPS    5           /* render-target uploads per frame above which the GPU is dropped */
+#define GPU_PENALTY      90
+#define GPU_KEY_SLOT     512         /* texture slot offset of the colour-keyed variant of a surface (= MAXS in dx.c) */          /* frames to stay on the CPU rasterizer after that */
+static int gpu_mode=-1;              /* -1 undecided, 0 off, 1 automatic, 2 always */
+static int gpu_dead=0;
+static Surf *g_res=NULL; static int g_res_valid=0, g_res_newer=0;
+static uint32_t *gpu_buf=NULL; static size_t gpu_buf_cap=0;
+static float *gpu_vtx=NULL; static size_t gpu_vtx_cap=0;
+static int pol_frame=-1, pol_use=0, pol_trips=0, pol_off_until=0; static long pol_px=0, pol_prev_px=0;
+static unsigned long st_gdraws=0, st_cdraws=0, st_trips=0, st_fgpu=0, st_fcpu=0, st_penalty=0;
+static uint32_t gexp16[65536]; static uint32_t gexp16_k[4]; static int gexp16_ok=0;
+
+static int gpu_usable(void){
+    if(gpu_dead) return 0;
+    if(gpu_mode<0){
+        gpu_mode=2;     /* default: always on (rbo_gpu_off.txt / rbo_gpu_auto.txt in the game folder change it) */
+        const char *e=getenv("RBO_GPU"); if(e&&e[0]=='0') gpu_mode=0; else if(e&&e[0]=='a') gpu_mode=1; else if(e&&e[0]=='1') gpu_mode=2;
+        if(g_root){   /* marker files in the game folder (no environment variables on iOS) */
+            char pth[1100]; snprintf(pth,sizeof pth,"%s/rbo_gpu_off.txt",g_root); if(access(pth,F_OK)==0) gpu_mode=0;
+            snprintf(pth,sizeof pth,"%s/rbo_gpu_auto.txt",g_root); if(gpu_mode&&access(pth,F_OK)==0) gpu_mode=1;
+        }
+        if(gpu_mode&&!gpu_init()){ fprintf(stderr,"[GPU] unavailable (%s): CPU rasterizer\n",gpu_error()); gpu_mode=0; }
+        else if(gpu_mode) fprintf(stderr,"[GPU] Metal rasterizer %s\n",gpu_mode==2?"forced on":"automatic");
+    }
+    if(gpu_mode==0) return 0;
+    if(gpu_failed()){ gpu_dead=1; g_res=NULL; g_res_valid=0; g_res_newer=0; fprintf(stderr,"[GPU] failed (%s): CPU rasterizer from now on\n",gpu_error()); return 0; }
+    return 1;
+}
+static void gpu_buf_need(size_t n){ if(n>gpu_buf_cap){ free(gpu_buf); gpu_buf=malloc(n*4); gpu_buf_cap=n; } }
+static void res_upload(Surf *s){
+    size_t n=(size_t)s->w*s->h; gpu_buf_need(n); const Fmt *f=fmt_of(s);
+    if(s->bpp==16){
+        uint32_t k[4]={s->rmask,s->gmask,s->bmask,s->amask};
+        if(!gexp16_ok||memcmp(gexp16_k,k,sizeof k)){ for(uint32_t v=0;v<65536;v++) gexp16[v]=to_argb_f(f,v); memcpy(gexp16_k,k,sizeof k); gexp16_ok=1; }
+        for(int y=0;y<s->h;y++){ const uint16_t *row=(const uint16_t*)(gmem+s->pix+(size_t)y*s->pitch); uint32_t *o=gpu_buf+(size_t)y*s->w; for(int x=0;x<s->w;x++) o[x]=gexp16[row[x]]; }
+    } else {
+        for(int y=0;y<s->h;y++){ const uint32_t *row=(const uint32_t*)(gmem+s->pix+(size_t)y*s->pitch); uint32_t *o=gpu_buf+(size_t)y*s->w; for(int x=0;x<s->w;x++) o[x]=to_argb_f(f,row[x]); }
+    }
+    gpu_rt_upload(gpu_buf,s->w,s->h); pol_trips++; st_trips++;
+}
+static void res_download(void){
+    Surf *s=g_res; if(!s||!g_res_newer) return;
+    size_t n=(size_t)s->w*s->h; gpu_buf_need(n); gpu_rt_read(gpu_buf); g_res_newer=0;
+    const Fmt *f=fmt_of(s); int prr=8-f->rb,pgr=8-f->gb,pbr=8-f->bb,par=8-f->ab, prs=f->rs,pgs=f->gs,pbs=f->bs,pas=f->as;
+    for(int y=0;y<s->h;y++){
+        const uint32_t *in=gpu_buf+(size_t)y*s->w; uint8_t *row=gmem+s->pix+(size_t)y*s->pitch;
+        if(s->bpp==16){ uint16_t *o=(uint16_t*)row;
+            for(int x=0;x<s->w;x++){ uint32_t a=in[x]; o[x]=(uint16_t)((((a>>16)&255)>>prr)<<prs | (((a>>8)&255)>>pgr)<<pgs | ((a&255)>>pbr)<<pbs | ((a>>24)>>par)<<pas); } }
+        else { uint32_t *o=(uint32_t*)row;
+            for(int x=0;x<s->w;x++){ uint32_t a=in[x]; o[x]=(((a>>16)&255)>>prr)<<prs | (((a>>8)&255)>>pgr)<<pgs | ((a&255)>>pbr)<<pbs | ((a>>24)>>par)<<pas; } }
+    }
+}
+void gpu_surf_access(Surf *s,int write){
+    if(!s||s!=g_res) return;
+    res_download();
+    if(write) g_res_valid=0;
+}
+void gpu_surf_release(Surf *s){ if(s&&s==g_res){ g_res=NULL; g_res_valid=0; g_res_newer=0; } }
+static int res_acquire(Surf *rt){
+    if(g_res&&g_res!=rt){ res_download(); g_res=NULL; g_res_valid=0; }
+    if(g_res!=rt){ gpu_rt_set(rt->w,rt->h); g_res=rt; g_res_valid=0; }
+    if(!g_res_valid){ res_upload(rt); g_res_valid=1; }
+    return !gpu_failed();
+}
+/* Render targets the GPU path reproduces exactly: 16/32 bpp, and either no alpha channel or a full 8-bit one (a 1- or 4-bit alpha would have to be re-quantised
+   after every write because blend factors read the destination alpha). */
+static int gpu_rt_ok(const Surf *rt){
+    if(!(rt->bpp==16||rt->bpp==32)||rt->w<=0||rt->h<=0||rt->w>8192||rt->h>8192) return 0;
+    return rt->amask==0||bits_of(rt->amask)==8;
+}
+static void gpu_frame_tick(void){
+    if(g_frames==pol_frame) return;
+    if(pol_frame>=0){
+        pol_prev_px=pol_px;
+        if(pol_use){ st_fgpu++; if(gpu_mode!=2&&pol_trips>GPU_MAX_TRIPS){ pol_off_until=g_frames+GPU_PENALTY; st_penalty++; } } else st_fcpu++;
+    }
+    pol_frame=g_frames; pol_px=0; pol_trips=0;
+    pol_use=(gpu_mode==2)||(pol_prev_px>=GPU_FRAME_MIN_PX&&g_frames>=pol_off_until);
+}
+static void gpu_state_for(const Surf *rt,GpuState *st){
+    memset(st,0,sizeof *st); st->tex_id=-1; st->write_alpha=rt->amask?1:0;
+    int cx0=D.vpx<0?0:D.vpx, cy0=D.vpy<0?0:D.vpy, cx1=D.vpx+D.vpw, cy1=D.vpy+D.vph; if(cx1>rt->w) cx1=rt->w; if(cy1>rt->h) cy1=rt->h;
+    st->sx=cx0; st->sy=cy0; st->sw=cx1-cx0; st->sh=cy1-cy0;
+}
+/* Draw the triangles collected in tris[] on the GPU.  Returns 0 when this draw has to go to the CPU rasterizer instead. */
+static int gpu_emit(Surf *rt){
+    Surf *t=NULL;
+    if(rc.tex_on){ t=surf_of(D.tex[0]); if(!t||t==rt||!t->cache||t->w<=0||t->h<=0) return 0; }
+    GpuState st; gpu_state_for(rt,&st); if(st.sw<=0||st.sh<=0) return 1;     /* nothing visible */
+    if(!res_acquire(rt)) return 0;
+    st.tex_on=rc.tex_on; st.cop=rc.cop; st.aop=rc.aop; st.ca1=rc.ca1; st.ca2=rc.ca2; st.aa1=rc.aa1; st.aa2=rc.aa2;
+    st.atest=rc.atest; st.afunc=rc.afunc; st.aref=rc.aref; st.blend=rc.blend; st.sf=rc.sf; st.df=rc.df;
+    st.tfac[0]=((rc.tfac>>16)&255)/255.0f; st.tfac[1]=((rc.tfac>>8)&255)/255.0f; st.tfac[2]=(rc.tfac&255)/255.0f; st.tfac[3]=(rc.tfac>>24)/255.0f;
+    if(rc.tex_on){
+        if(rc.use_key){   /* colour-keyed draw: keyed texels are zero (the CPU filter treats them as transparent black) and a mask kills fully keyed samples */
+            if(t->ggen_k!=t->cgen){
+                size_t n=(size_t)t->w*t->h; gpu_buf_need(n); for(size_t i=0;i<n;i++) gpu_buf[i]=t->keymask[i]?0u:t->cache[i];
+                gpu_tex_upload(t->id+GPU_KEY_SLOT,gpu_buf,t->keymask,t->w,t->h); t->ggen_k=t->cgen; }
+            st.tex_id=t->id+GPU_KEY_SLOT;
+        } else {
+            if(t->ggen!=t->cgen){ gpu_tex_upload(t->id,t->cache,NULL,t->w,t->h); t->ggen=t->cgen; }
+            st.tex_id=t->id;
+        }
+        st.tw=t->w; st.th=t->h; st.use_key=rc.use_key; st.point=!rc.linear;
+        st.addr=rc.addr==2?1:(rc.addr==3?2:0);
+    }
+    size_t nv=ntris*3; if(nv*8>gpu_vtx_cap){ gpu_vtx_cap=nv*8*2; free(gpu_vtx); gpu_vtx=malloc(gpu_vtx_cap*sizeof(float)); }
+    float *o=gpu_vtx;
+    for(size_t k=0;k<ntris;k++){ const Vtx *v3[3]={&tris[k].a,&tris[k].b,&tris[k].c};
+        for(int j=0;j<3;j++){ const Vtx *v=v3[j]; uint32_t c=v->col;
+            o[0]=v->x; o[1]=v->y; o[2]=v->u; o[3]=v->v; o[4]=((c>>16)&255)/255.0f; o[5]=((c>>8)&255)/255.0f; o[6]=(c&255)/255.0f; o[7]=(c>>24)/255.0f; o+=8; } }
+    gpu_draw(&st,gpu_vtx,(int)nv);
+    g_res_newer=1; rt->cache_ok=0; st_gdraws++;
+    return 1;
+}
+/* Clear one rectangle of the resident render target on the GPU.  Returns 0 when the CPU has to do it. */
+static int gpu_clear_rect(Surf *rt,int l,int t,int r,int b,uint32_t color){
+    if(!(g_res==rt&&g_res_valid)||!gpu_usable()||!gpu_rt_ok(rt)) return 0;
+    if(l<0)l=0; if(t<0)t=0; if(r>rt->w)r=rt->w; if(b>rt->h)b=rt->h; if(l>=r||t>=b) return 1;
+    GpuState st; gpu_state_for(rt,&st); st.sx=l; st.sy=t; st.sw=r-l; st.sh=b-t;
+    float w=(float)rt->w, h=(float)rt->h, cr=((color>>16)&255)/255.0f, cg=((color>>8)&255)/255.0f, cb=(color&255)/255.0f, ca=(color>>24)/255.0f;
+    const float q[6][2]={{0,0},{w,0},{0,h},{w,0},{w,h},{0,h}}; float vb[6*8];
+    for(int i=0;i<6;i++){ float *o=vb+i*8; o[0]=q[i][0]; o[1]=q[i][1]; o[2]=0; o[3]=0; o[4]=cr; o[5]=cg; o[6]=cb; o[7]=ca; }
+    gpu_draw(&st,vb,6); g_res_newer=1; rt->cache_ok=0;
+    return 1;
+}
+int d3d_gpu_report(char *out,int n){
+    static unsigned long l_gd=0,l_cd=0,l_tr=0,l_sy=0,l_vx=0; static double l_wt=0;
+    unsigned long sy=0,vx=0,ru=0; double wt=0; if(gpu_mode>0&&!gpu_dead) gpu_stats(&sy,&wt,&vx,&ru);
+    int len=snprintf(out,n,"[GPU] %s | draws gpu %lu cpu %lu | uploads %lu | waits %lu (%.1f ms) verts %lu | frames gpu %lu cpu %lu penalty %lu%s%s\n",
+        gpu_dead?"failed":(gpu_mode==0?"off":(gpu_mode==2?"forced":"auto")),st_gdraws-l_gd,st_cdraws-l_cd,st_trips-l_tr,sy-l_sy,wt-l_wt,vx-l_vx,st_fgpu,st_fcpu,st_penalty,
+        (gpu_error()[0]?" | ":""),gpu_error());
+    l_gd=st_gdraws; l_cd=st_cdraws; l_tr=st_trips; l_sy=sy; l_wt=wt; l_vx=vx;
+    return len<0?0:(len<n?len:n-1);
+}
+#else
+void gpu_surf_access(Surf *s,int write){ (void)s; (void)write; }
+void gpu_surf_release(Surf *s){ (void)s; }
+int d3d_gpu_report(char *out,int n){ return snprintf(out,n,"[GPU] not built\n"); }
+#endif
 static Vtx *vbuf=NULL; static size_t vbuf_cap=0;
 static void draw(uint32_t type,uint32_t fvf,uint32_t vp,uint32_t nv,uint32_t idxp,uint32_t ni){
     Surf *rt=surf_of(D.target); if(!rt) return;
@@ -466,6 +622,12 @@ static void draw(uint32_t type,uint32_t fvf,uint32_t vp,uint32_t nv,uint32_t idx
     else if(type==5) for(uint32_t i=0;i+2<n;i++){ if(i&1) tri_setup(rt,VI(i+1),VI(i),VI(i+2)); else tri_setup(rt,VI(i),VI(i+1),VI(i+2)); }
     else if(type==6) for(uint32_t i=1;i+1<n;i++) tri_setup(rt,VI(0),VI(i),VI(i+1));
     else { static int warned; if(!warned++) fprintf(stderr,"[D3D] primitive type %u not rasterized\n",type); }
+#ifdef RBO_GPU
+    gpu_frame_tick();
+    { long px=0; for(size_t k=0;k<ntris;k++) px+=(long)(tris[k].x1-tris[k].x0)*(tris[k].y1-tris[k].y0); pol_px+=px; }
+    if(ntris && pol_use && gpu_rt_ok(rt) && gpu_usable() && gpu_emit(rt)){ ntris=0; return; }
+    if(ntris){ gpu_surf_access(rt,1); st_cdraws++; }       /* CPU rasterizer: bring the pixels back first and mark the GPU copy stale */
+#endif
     raster_flush(rt);
 }
 
@@ -527,6 +689,13 @@ static void dv_GetRenderTarget(void){ wr32(A(1),D.target); RET(0); }
 static void dv_Clear(void){
     uint32_t cnt=A(1), rects=A(2), flags=A(3), color=A(4); Surf *rt=surf_of(D.target);
     if((flags&1)&&rt){
+#ifdef RBO_GPU
+        { int done=1;
+          if(!cnt) done=gpu_clear_rect(rt,D.vpx,D.vpy,D.vpx+D.vpw,D.vpy+D.vph,color);
+          else for(uint32_t i=0;i<cnt&&done;i++) done=gpu_clear_rect(rt,(int)rd32(rects+16*i),(int)rd32(rects+16*i+4),(int)rd32(rects+16*i+8),(int)rd32(rects+16*i+12),color);
+          if(done){ RET(0); return; }
+          gpu_surf_access(rt,1); }       /* a partly cleared target (some rects already on the GPU) is read back first, then redone on the CPU */
+#endif
         uint32_t px=from_argb(rt,color);
         if(!cnt){ for(int y=D.vpy;y<D.vpy+D.vph&&y<rt->h;y++) for(int x=D.vpx;x<D.vpx+D.vpw&&x<rt->w;x++) put_raw(rt,x,y,px); }
         else for(uint32_t i=0;i<cnt;i++){ int l=rd32(rects+16*i),t=rd32(rects+16*i+4),r=rd32(rects+16*i+8),b=rd32(rects+16*i+12);
@@ -551,7 +720,7 @@ static void dv_SetTSS(void){ if(A(1)<8&&A(2)<32) D.tss[A(1)][A(2)]=A(3); RET(0);
 static void dv_GetTSS(void){ wr32(A(3),(A(1)<8&&A(2)<32)?D.tss[A(1)][A(2)]:0); RET(0); }
 static void dv_ValidateDevice(void){ if(A(1)) wr32(A(1),1); RET(0); }
 static void dv_Load(void){ /* (dst,dstpt,src,srcrect,flags) : copy whole surface */
-    Surf *d=surf_of(A(1)), *s=surf_of(A(3)); if(d) d->cache_ok=0; if(d&&s&&d->bpp==s->bpp){ int h=s->h<d->h?s->h:d->h; int rowb=(s->w<d->w?s->w:d->w)*(s->bpp/8); for(int y=0;y<h;y++) memcpy(gmem+d->pix+y*d->pitch,gmem+s->pix+y*s->pitch,rowb); } RET(0); }
+    Surf *d=surf_of(A(1)), *s=surf_of(A(3)); if(d) d->cache_ok=0; if(d) gpu_surf_access(d,1); if(s) gpu_surf_access(s,0); if(d&&s&&d->bpp==s->bpp){ int h=s->h<d->h?s->h:d->h; int rowb=(s->w<d->w?s->w:d->w)*(s->bpp/8); for(int y=0;y<h;y++) memcpy(gmem+d->pix+y*d->pitch,gmem+s->pix+y*s->pitch,rowb); } RET(0); }
 
 static void warn_default(void){ static unsigned char seen[512]; int i=g_cur_idx&511; if(!seen[i]){ seen[i]=1; fprintf(stderr,"[D3D stub] %s -> S_OK\n",hle_name(g_cur_idx)); } RET(0); }
 

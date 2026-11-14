@@ -138,7 +138,7 @@ static uint32_t vnow(void){ if(g_fast){ vk++; return (uint32_t)vtime_ms(); } ret
 #define MAXH 256
 static struct { int fd; int used; char path[96]; } hs[MAXH];
 static uint32_t last_error=0;
-int resolve_path(const char *gpath,char *out,size_t outsz){
+static int resolve_path_slow(const char *gpath,char *out,size_t outsz){
     char tmp[1024]; size_t n=0;
     for(const char*p=gpath;*p&&n<sizeof tmp-1;p++) tmp[n++]=(*p=='\\')?'/':*p;
     tmp[n]=0;
@@ -161,6 +161,33 @@ int resolve_path(const char *gpath,char *out,size_t outsz){
         }
     }
     return 1;
+}
+/* Cache of successful lookups.  The slow path opendir()s every directory of the path and scans it with strcasecmp, which is
+   expensive in big asset directories and runs for every CreateFileA/PathFileExistsA (hundreds per second when a message loads
+   its portrait/voice).  Only existing files are cached (a missing file may be created later); a hit is re-checked with access(). */
+#define RP_SLOTS 2048
+static struct { uint32_t h; char *key; char *host; } rp_cache[RP_SLOTS];
+static uint32_t rp_hash(const char *k){ uint32_t h=2166136261u; for(;*k;k++){ h^=(uint8_t)*k; h*=16777619u; } return h|1u; }
+int resolve_path(const char *gpath,char *out,size_t outsz){
+    char key[1024]; size_t n=0;
+    for(const char *p=gpath;*p&&n<sizeof key-1;p++){ char c=(*p=='\\')?'/':*p; if(c>='A'&&c<='Z') c+=32; key[n++]=c; }
+    key[n]=0;
+    uint32_t h=rp_hash(key), i=h%RP_SLOTS;
+    for(int probe=0;probe<8;probe++,i=(i+1)%RP_SLOTS){
+        if(rp_cache[i].h==h && rp_cache[i].key && !strcmp(rp_cache[i].key,key)){
+            if(strlen(rp_cache[i].host)<outsz && access(rp_cache[i].host,F_OK)==0){ snprintf(out,outsz,"%s",rp_cache[i].host); return 1; }
+            free(rp_cache[i].key); free(rp_cache[i].host); rp_cache[i].key=rp_cache[i].host=NULL; rp_cache[i].h=0; break;
+        }
+    }
+    int ex=resolve_path_slow(gpath,out,outsz);
+    if(ex){
+        i=h%RP_SLOTS; int slot=-1;
+        for(int probe=0;probe<8;probe++,i=(i+1)%RP_SLOTS) if(!rp_cache[i].key){ slot=(int)i; break; }
+        if(slot<0) slot=(int)(h%RP_SLOTS);                       /* all 8 probes taken: replace the first */
+        free(rp_cache[slot].key); free(rp_cache[slot].host);
+        rp_cache[slot].h=h; rp_cache[slot].key=strdup(key); rp_cache[slot].host=strdup(out);
+    }
+    return ex;
 }
 static uint32_t newhandle(int fd){ for(int i=1;i<MAXH;i++) if(!hs[i].used){ hs[i].used=1; hs[i].fd=fd; hs[i].path[0]=0; return 0x1000+i*4; } return 0xFFFFFFFF; }
 static int hfd(uint32_t h){ int i=(h-0x1000)/4; if(h<0x1000||i<=0||i>=MAXH||!hs[i].used) return -1; return hs[i].fd; }
