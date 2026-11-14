@@ -29,19 +29,20 @@ struct LauncherView: View {
         .fileImporter(isPresented: $showPicker, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result { saveBookmark(url) }
         }
-        .onAppear { restoreName() }
+        .onAppear { restoreName(); if running == nil { BGM.play() } }
+        .onChange(of: running) { r in if r == nil { BGM.play() } else { BGM.stop() } }
     }
 
     private var menu: some View {
         VStack(alignment: .leading, spacing: 18) {
             ForEach(Edition.available) { ed in
-                Button(action: { launch(ed) }) {
+                Button(action: { ClickSound.play(); launch(ed) }) {
                     HStack { Text("\(ed.title) 시작하기").font(.system(size: 26, weight: .bold)); Text("▶").font(.system(size: 22)) }
                         .foregroundColor(.white)
                 }
             }
             Divider().background(Color.gray)
-            Button("게임 폴더 선택…") { showPicker = true }.foregroundColor(.cyan)
+            Button("게임 폴더 선택…") { ClickSound.play(); showPicker = true }.foregroundColor(.cyan)
             Text(folderName.isEmpty ? "게임 폴더가 선택되지 않았어요 (RBO.exe와 DATA 폴더가 있는 곳)" : "폴더: \(folderName)")
                 .font(.footnote).foregroundColor(.gray)
             if !message.isEmpty { Text(message).font(.footnote).foregroundColor(.orange) }
