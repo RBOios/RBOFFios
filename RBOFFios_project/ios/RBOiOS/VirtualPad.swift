@@ -179,17 +179,18 @@ private struct RectGlow: View {
 struct PauseButton: View {
     let key: Int32
     @State private var held = false
+    @State private var lit = false          // 화면에 불 켜진 모양 (손가락을 금방 떼도 최소 시간은 유지)
     @State private var pressedAt = Date()
     @State private var token = 0
 
     var body: some View {
         ZStack {
             RectGlow(glow: 0.5)                // PPSSPP Start-button glow: the filled rectangle lights up while pressed
-                .opacity(held ? 1 : 0)
+                .opacity(lit ? 1 : 0)
             Image("PauseButton")
                 .resizable()
                 .scaledToFit()
-                .opacity(held ? 0.80 : 0.32)   // same as the action-button outline (idle 0.32, pressed 0.80)
+                .opacity(lit ? 0.80 : 0.32)   // same as the action-button outline (idle 0.32, pressed 0.80)
         }
         .aspectRatio(1264.0 / 496.0, contentMode: .fit)   // = the picture's shape, so the glow lines up with it
             .padding(10)                       // bigger touch target than the picture itself
@@ -197,15 +198,19 @@ struct PauseButton: View {
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { _ in
                     guard !held else { return }
-                    held = true; pressedAt = Date(); token += 1
+                    held = true; lit = true; pressedAt = Date(); token += 1
                     rbo_set_key(key, 1)
                 }
                 .onEnded { _ in
                     held = false
                     let id = token
-                    let wait = max(0, 0.10 - Date().timeIntervalSince(pressedAt))
-                    DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
+                    let elapsed = Date().timeIntervalSince(pressedAt)
+                    // 키는 최소 0.10초, 불빛은 최소 0.18초 유지 (짧게 톡 쳐도 불이 들어온 게 보이도록)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + max(0, 0.10 - elapsed)) {
                         if token == id { rbo_set_key(key, 0) }   // ignore if pressed again meanwhile
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + max(0, 0.18 - elapsed)) {
+                        if token == id { lit = false }
                     }
                 })
     }
@@ -219,6 +224,7 @@ struct PadButton: View {
     var fontScale: CGFloat = 0.30
     var hitExtra: CGFloat = 0
     @State private var held = false
+    @State private var lit = false          // 화면에 불 켜진 모양 (손가락을 금방 떼도 최소 시간은 유지)
     @State private var pressedAt = Date()
     @State private var token = 0
 
@@ -228,15 +234,15 @@ struct PadButton: View {
             let m = max(full - 2 * hitExtra, 1)
             ZStack {
                 ZStack {
-                    Capsule().fill(Color.white.opacity(held ? 0.30 : 0.08))
-                    Capsule().stroke(Color.white.opacity(held ? 0.80 : 0.32), lineWidth: held ? 3 : 1.5)
-                        .shadow(color: Color.white.opacity(held ? 0.70 : 0), radius: held ? 8 : 0)   // lights up when pressed, like the D-pad
+                    Capsule().fill(Color.white.opacity(lit ? 0.30 : 0.08))
+                    Capsule().stroke(Color.white.opacity(lit ? 0.80 : 0.32), lineWidth: lit ? 3 : 1.5)
+                        .shadow(color: Color.white.opacity(lit ? 0.70 : 0), radius: lit ? 8 : 0)   // lights up when pressed, like the D-pad
                     Text(label)
                         .font(.system(size: m * fontScale, weight: .bold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.5)
                         .padding(.horizontal, m * 0.08)
-                        .foregroundColor(Color.white.opacity(held ? 0.80 : 0.32))   // same as the D-pad (idle 0.32, pressed 0.80)
+                        .foregroundColor(Color.white.opacity(lit ? 0.80 : 0.32))   // same as the D-pad (idle 0.32, pressed 0.80)
                 }
                 .frame(width: m, height: m)
             }
@@ -245,15 +251,19 @@ struct PadButton: View {
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { _ in
                     guard !held else { return }
-                    held = true; pressedAt = Date(); token += 1
+                    held = true; lit = true; pressedAt = Date(); token += 1
                     rbo_set_key(key, 1)
                 }
                 .onEnded { _ in
                     held = false
                     let id = token
-                    let wait = max(0, 0.10 - Date().timeIntervalSince(pressedAt))
-                    DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
+                    let elapsed = Date().timeIntervalSince(pressedAt)
+                    // 키는 최소 0.10초, 불빛은 최소 0.18초 유지 (짧게 톡 쳐도 불이 들어온 게 보이도록)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + max(0, 0.10 - elapsed)) {
                         if token == id { rbo_set_key(key, 0) }   // ignore if pressed again meanwhile
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + max(0, 0.18 - elapsed)) {
+                        if token == id { lit = false }
                     }
                 })
         }
