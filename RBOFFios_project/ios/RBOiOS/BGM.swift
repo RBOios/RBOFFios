@@ -12,7 +12,7 @@ enum BGM {
 
     static func play() {
         guard let p = player, !p.isPlaying else { return }
-        try? AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         try? AVAudioSession.sharedInstance().setActive(true)
         p.play()
     }

@@ -10,8 +10,8 @@ enum ClickSound {
     }()
 
     static func play() {
-        // .ambient: respects the silent switch and mixes with other audio; AudioOut switches to .playback once a game starts.
-        try? AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default)
+        // .playback: keeps playing even with the iPhone silent switch on (same category the game audio uses).
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         try? AVAudioSession.sharedInstance().setActive(true)
         player?.currentTime = 0
         player?.play()
