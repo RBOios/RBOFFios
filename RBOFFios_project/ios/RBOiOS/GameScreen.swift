@@ -43,6 +43,7 @@ struct MetalGameView: UIViewRepresentable {
 struct GameScreen: View {
     let edition: Edition
     let root: URL
+    let screenSize: ScreenSize
     @State private var host: EmulatorHost? = nil
     @State private var finished = false
     @StateObject private var pad = PadInput()   // physical gamepad; also tells us when to hide the touch pad
@@ -74,7 +75,7 @@ struct GameScreen: View {
     var body: some View {
         ZStack {
             if let host = host { MetalGameView(host: host).ignoresSafeArea() }
-            if !pad.controllerConnected { VirtualPad() }   // hidden while a Bluetooth/MFi gamepad is connected
+            if !pad.controllerConnected { VirtualPad(gameAspect: CGFloat(screenSize.aspect)) }   // hidden while a Bluetooth/MFi gamepad is connected
             if showOverlay {
                 VStack {
                     HStack {
@@ -119,6 +120,7 @@ struct GameScreen: View {
         }
         .onAppear {
             guard let p = MetalPresenter.make() else { return }
+            p.displayAspect = screenSize.aspect
             let h = EmulatorHost(presenter: p)
             h.onFinished = { finished = true; logLine("게임 종료") }
             openLog()

@@ -6,8 +6,9 @@ import UIKit
 struct VirtualPad: View {
     // D-pad frame as fractions of the screen (x, y, width, height); the pad is drawn as the largest square that fits.
     private let dpadFrame = CGRect(x: 0.055, y: 0.560, width: 0.190, height: 0.315)
-    // Game picture is drawn aspect-fit and centred (Expansion 3 renders 1280x1024); the rest of the screen is black bars.
-    private let gameAspect: CGFloat = 1280.0 / 1024.0
+    // Game picture is drawn aspect-fit and centred in this shape (4:3 normally, 16:9 for the virtual PSP); the rest of the screen is black bars.
+    private let gameAspect: CGFloat
+    init(gameAspect: CGFloat = 4.0 / 3.0) { self.gameAspect = gameAspect }
     // Round buttons, laid out in a diamond. Units: fractions of the screen height, relative to the cluster centre.
     private let buttons: [(label: String, key: Int32, dx: CGFloat, dy: CGFloat)] = [
         ("특수",   DIK.f,  0.0,    -0.130),   // top

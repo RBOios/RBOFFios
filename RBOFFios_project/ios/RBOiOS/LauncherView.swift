@@ -7,6 +7,8 @@ struct LauncherView: View {
     @State private var running: Edition? = nil
     @State private var gameURL: URL? = nil
     @State private var message: String = ""
+    @AppStorage("screenSize") private var screenSizeRaw: Int = ScreenSize.s640.rawValue
+    private var screenSize: ScreenSize { ScreenSize(rawValue: screenSizeRaw) ?? .s640 }
 
     var body: some View {
         ZStack {
@@ -21,7 +23,7 @@ struct LauncherView: View {
                 }.ignoresSafeArea()
             }
             if let ed = running, let url = gameURL {
-                GameScreen(edition: ed, root: url)
+                GameScreen(edition: ed, root: url, screenSize: screenSize)
             } else {
                 menu
             }
@@ -42,6 +44,13 @@ struct LauncherView: View {
                 }
             }
             Divider().background(Color.gray)
+            HStack {
+                Text("화면 크기").foregroundColor(.white)
+                Picker("화면 크기", selection: $screenSizeRaw) {
+                    ForEach(ScreenSize.allCases) { Text($0.title).tag($0.rawValue) }
+                }
+                .pickerStyle(.menu).accentColor(.cyan)
+            }
             Button("게임 폴더 선택…") { ClickSound.play(); showPicker = true }.foregroundColor(.cyan)
             Text(folderName.isEmpty ? "게임 폴더가 선택되지 않았어요 (RBO.exe와 DATA 폴더가 있는 곳)" : "폴더: \(folderName)")
                 .font(.footnote).foregroundColor(.gray)
@@ -78,7 +87,7 @@ struct LauncherView: View {
             message = "\(ed.exeName) 파일을 찾지 못했어요."; url.stopAccessingSecurityScopedResource(); return
         }
         KeyConfigPatcher.apply(root: url)
-        SystemConfigPatcher.apply(root: url, size: .s640)      // fixed 640x480 (no screen-size choice any more); the GPU scales it to the screen
+        SystemConfigPatcher.apply(root: url, size: screenSize)  // the launcher's screen-size choice; the picture is always 640x480 and the GPU scales it
         message = ""; gameURL = url; running = ed        // access stays open while the game runs
     }
 }

@@ -11,8 +11,8 @@ final class MetalPresenter: NSObject, MTKViewDelegate {
     private var pw = 0, ph = 0
     private var dirty = false
     private let lock = NSLock()
-    /// The game is shown 5:4 (it stretches 640x480 to 1280x1024), whatever size the emulator hands over; the GPU does the scaling.
-    private let displayAspect: Float = 1280.0 / 1024.0
+    /// Shape the picture is shown in (set by the launcher's screen-size choice); the GPU does the scaling. Default 4:3 = the game's own 640x480.
+    var displayAspect: Float = 4.0 / 3.0
 
     private static let shaderSource = """
     #include <metal_stdlib>

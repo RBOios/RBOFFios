@@ -53,6 +53,13 @@ enum ScreenSize: Int, CaseIterable, Identifiable {
         case .s1024: return "1024x768"
         }
     }
+    /// Shape of the picture on screen. The game always draws 640x480 (4:3); only the virtual PSP shows a 480x272 (16:9) window.
+    var aspect: Float {
+        switch self {
+        case .psp: return 480.0 / 272.0
+        default: return 4.0 / 3.0
+        }
+    }
 }
 
 /// Reads/writes the screen-size field of SystemConfig.v4 (what RBO_Ex3_Config.exe's "화면 크기" box saves).

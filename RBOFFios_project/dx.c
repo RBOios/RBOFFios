@@ -296,6 +296,9 @@ static void dd_CreateSurface(void){
     int w=rd32(d+12), h=rd32(d+8);
     uint32_t r,g,b,a; Surf tmp;
     if(caps&0x200){ if(disp_set){ w=disp_w; h=disp_h; } else { w=1920; h=1200; } }
+    /* "640x480" setting: the game makes a 1280x1024 off-screen buffer (the fake window size) but only ever draws 640x480 into its top-left corner.
+       Make that buffer 640x480 (RBO_NOSHRINK=1 turns this off). */
+    if(!(caps&0x200) && !disp_set && w==1280 && h==1024 && !getenv("RBO_NOSHRINK")){ w=640; h=480; }
     int bpp=disp_bpp; fmt_for_bpp(bpp,&r,&g,&b,&a);
     if(flags&0x1000){ uint32_t pf=d+72; if(rd32(pf+4)&0x40){ bpp=rd32(pf+12); r=rd32(pf+16); g=rd32(pf+20); b=rd32(pf+24); a=rd32(pf+28);} }
     (void)tmp;
