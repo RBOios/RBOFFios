@@ -9,6 +9,7 @@ typedef struct {
     int ck_valid; uint32_t ck_lo, ck_hi;
     int locked;
     uint32_t *cache; uint8_t *keymask; int cache_ok; int cache_cap;
+    int refs, zomb; unsigned zseq;   /* COM reference count; zomb=1 once the game released the last reference (slot may be recycled when all slots are in use) */
     int id; uint32_t cgen, ggen, ggen_k;   /* surface index; texture-cache generation / generation last uploaded to the GPU (gpu_raster) */
 } Surf;
 uint32_t make_vtable(Iface *ifc);

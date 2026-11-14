@@ -53,11 +53,36 @@ static void fmt_for_bpp(int bpp,uint32_t*r,uint32_t*g,uint32_t*b,uint32_t*a){
     if(bpp==16){*r=0xF800;*g=0x07E0;*b=0x001F;}
     else {*r=0xFF0000;*g=0x00FF00;*b=0x0000FF; if(bpp==32)*a=0;}
 }
+static unsigned zseq_ctr=0;
+/* The game releases surfaces with IDirectDrawSurface::Release, but without reference counting every CreateSurface used a slot (and guest memory) forever and the
+   512 slots ran out after a few stages ("out of surfaces" -> abort).  Released surfaces are only marked here; their slot is reused when no free slot is left. */
+static void surf_zombify(Surf *s){
+    if(!s||!s->used||s->zomb) return;
+    s->zomb=1; s->zseq=++zseq_ctr;
+    if(s->back_id>=0&&s->back_id<MAXS&&S[s->back_id].used){ Surf *b=&S[s->back_id]; b->zomb=1; b->zseq=++zseq_ctr; }
+}
+static int reclaim_zombie(int w,int h,int bpp){
+    int best=-1,bests=-1; unsigned bz=0,sz=0;
+    for(int i=0;i<MAXS;i++){ Surf *z=&S[i]; if(!z->used||!z->zomb||z->is_primary||z->is_back) continue;
+        if(z->w==w&&z->h==h&&z->bpp==bpp){ if(bests<0||z->zseq<sz){ bests=i; sz=z->zseq; } }
+        if(best<0||z->zseq<bz){ best=i; bz=z->zseq; } }
+    if(bests>=0) return bests;
+    return best;
+}
 static int new_surface(int w,int h,int bpp,uint32_t r,uint32_t g,uint32_t b,uint32_t a,uint32_t *objout){
     int id=-1; for(int i=0;i<MAXS;i++) if(!S[i].used){id=i;break;}
+    if(id<0) id=reclaim_zombie(w,h,bpp);
     if(id<0){ fprintf(stderr,"[DDraw] out of surfaces\n"); abort(); }
-    Surf *s=&S[id]; gpu_surf_release(s); memset(s,0,sizeof *s); s->id=id; s->used=1; s->w=w; s->h=h; s->bpp=bpp;
-    s->pitch=((w*(bpp/8))+3)&~3; s->pix=ga_alloc(s->pitch*h+16,1);
+    Surf *s=&S[id]; gpu_surf_release(s);
+    uint32_t keep_pix=0; int reuse=0;
+    if(s->used){            /* recycled slot of a released surface */
+        if(s->w==w&&s->h==h&&s->bpp==bpp&&s->pix){ keep_pix=s->pix; reuse=1; } else if(s->pix) ga_free(s->pix);
+        free(s->cache); free(s->keymask);
+        if(s->back_id>=0&&s->back_id<MAXS&&S[s->back_id].zomb&&S[s->back_id].is_back&&s->back_id!=id){ /* its implicit back buffer goes with it */ Surf *bk=&S[s->back_id]; if(bk->pix) ga_free(bk->pix); free(bk->cache); free(bk->keymask); gpu_surf_release(bk); memset(bk,0,sizeof *bk); }
+    }
+    memset(s,0,sizeof *s); s->id=id; s->used=1; s->refs=1; s->w=w; s->h=h; s->bpp=bpp;
+    s->pitch=((w*(bpp/8))+3)&~3;
+    if(reuse){ s->pix=keep_pix; memset(gmem+s->pix,0,(size_t)s->pitch*h); } else s->pix=ga_alloc(s->pitch*h+16,1);
     s->rmask=r; s->gmask=g; s->bmask=b; s->amask=a; s->back_id=-1;
     s->obj=ga_alloc(8,1); wr32(s->obj,vt_surf); wr32(s->obj+4,id);
     if(objout)*objout=s->obj;
@@ -267,7 +292,7 @@ static void dd_CreateSurface(void){
     if(caps&0x200){
         S[id].is_primary=1; primary_id=id;
         if((flags&0x20)&&rd32(d+20)>=1){
-            uint32_t bobj; int bid=new_surface(w,h,bpp,r,g,b,a,&bobj); S[bid].is_back=1; S[id].back_id=bid;
+            uint32_t bobj; int bid=new_surface(w,h,bpp,r,g,b,a,&bobj); S[bid].is_back=1; S[bid].refs=0; S[id].back_id=bid;
         }
     }
     if(g_trace) fprintf(stderr,"[DDraw] CreateSurface id=%d %dx%d bpp=%d caps=%08x flags=%08x\n",id,w,h,bpp,caps,flags);
@@ -297,7 +322,10 @@ static void dd_WaitForVerticalBlank(void){
     if(next>t) hle_sleep_us(next-t,2); last_vb=next>t?next:t; RET(0);
 }
 
-static void sf_GetAttachedSurface(void){ Surf *s=surf_of(A(0)); if(s&&s->back_id>=0){ wr32(A(2),S[s->back_id].obj); RET(0);} else { wr32(A(2),0); RET(0x887602ACu /*DDERR_NOTFOUND*/);} }
+static void sf_AddRef(void){ Surf *s=surf_of(A(0)); uint32_t r=1; if(s&&s->used){ s->refs++; r=(uint32_t)s->refs; } RET(r); }
+static void sf_Release(void){ Surf *s=surf_of(A(0)); uint32_t r=0; if(s&&s->used&&s->refs>0){ r=(uint32_t)--s->refs; if(r==0&&!s->is_back) surf_zombify(s); } RET(r); }
+static void sf_QI(void){ uint32_t obj=A(0), outp=A(2); com_qi(); if(cpu.r[EAX]==0&&outp&&rd32(outp)==obj){ Surf *s=surf_of(obj); if(s&&s->used) s->refs++; } }
+static void sf_GetAttachedSurface(void){ Surf *s=surf_of(A(0)); if(s&&s->back_id>=0){ wr32(A(2),S[s->back_id].obj); S[s->back_id].refs++; RET(0);} else { wr32(A(2),0); RET(0x887602ACu /*DDERR_NOTFOUND*/);} }
 static void sf_Flip(void){
     Surf *s=surf_of(A(0)); if(s&&s->back_id>=0){ Surf *b=&S[s->back_id]; gpu_surf_access(b,0); gpu_surf_access(s,1); memcpy(gmem+s->pix,gmem+b->pix,s->pitch*s->h); }
     present(); RET(0);
@@ -365,7 +393,7 @@ void ddraw_register(void){
     dd_impl[DD_CreateClipper]=dd_CreateClipper; dd_impl[DD_CreatePalette]=dd_CreatePalette;
     dd_impl[DD_GetAvailableVidMem]=dd_GetAvailableVidMem; dd_impl[DD_WaitForVerticalBlank]=dd_WaitForVerticalBlank;
     for(int i=0;i<SF_N;i++) sf_impl[i]=com_default;
-    sf_impl[SF_QI]=com_qi; sf_impl[SF_AddRef]=com_addref; sf_impl[SF_Release]=com_release;
+    sf_impl[SF_QI]=sf_QI; sf_impl[SF_AddRef]=sf_AddRef; sf_impl[SF_Release]=sf_Release;
     sf_impl[SF_GetAttachedSurface]=sf_GetAttachedSurface; sf_impl[SF_Flip]=sf_Flip; sf_impl[SF_Blt]=sf_Blt; sf_impl[SF_BltFast]=sf_BltFast;
     sf_impl[SF_Lock]=sf_Lock; sf_impl[SF_Unlock]=sf_Unlock; sf_impl[SF_GetSurfaceDesc]=sf_GetSurfaceDesc; sf_impl[SF_GetPixelFormat]=sf_GetPixelFormat;
     sf_impl[SF_SetColorKey]=sf_SetColorKey; sf_impl[SF_IsLost]=sf_IsLost;
