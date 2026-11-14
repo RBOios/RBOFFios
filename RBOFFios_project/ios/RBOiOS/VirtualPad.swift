@@ -67,11 +67,12 @@ struct VirtualPad: View {
     }
 }
 
-/// Four-piece D-pad image (outline only, transparent background). Touch position -> up/down/left/right, diagonals when two sectors overlap.
+/// Four-piece D-pad (PPSSPP arrows: outline + a filled arrow that lights up while pressed; transparent background). Touch position -> up/down/left/right, diagonals when two sectors overlap.
 struct DPad: View {
     private struct Dir: Equatable { var l = false, r = false, u = false, d = false }
     private static let idleOpacity: Double = 0.32     // pieces at rest (same as the action-button outline)
     private static let pressedOpacity: Double = 0.80  // pressed (same as the action buttons)
+    private static let glowOpacity: Double = 0.50     // PPSSPP "glow": the filled arrow lights up behind the outline while pressed
     private static let deadzone: CGFloat = 0.12       // fraction of the pad radius where nothing is pressed
     private static let sector: CGFloat = 0.38         // sin(22.5 deg): 8-way split
     @State private var dir = Dir()
@@ -80,10 +81,10 @@ struct DPad: View {
         GeometryReader { geo in
             let size = min(geo.size.width, geo.size.height)
             ZStack {
-                piece("DPadUp", dir.u)
-                piece("DPadDown", dir.d)
-                piece("DPadLeft", dir.l)
-                piece("DPadRight", dir.r)
+                piece("DPadUp", 0, dir.u)
+                piece("DPadDown", 180, dir.d)
+                piece("DPadLeft", 270, dir.l)
+                piece("DPadRight", 90, dir.r)
             }
             .frame(width: size, height: size)
             .frame(width: geo.size.width, height: geo.size.height)
@@ -96,11 +97,15 @@ struct DPad: View {
         }
     }
 
-    private func piece(_ name: String, _ pressed: Bool) -> some View {
-        Image(name)
-            .resizable()
-            .scaledToFit()
-            .opacity(pressed ? Self.pressedOpacity : Self.idleOpacity)
+    private func piece(_ name: String, _ rotation: Double, _ pressed: Bool) -> some View {
+        ZStack {
+            ArrowGlow(rotation: rotation, glow: Self.glowOpacity)
+                .opacity(pressed ? 1 : 0)
+            Image(name)
+                .resizable()
+                .scaledToFit()
+                .opacity(pressed ? Self.pressedOpacity : Self.idleOpacity)
+        }
     }
 
     private func update(dx: CGFloat, dy: CGFloat, radius: CGFloat) {
@@ -121,7 +126,56 @@ struct DPad: View {
     }
 }
 
-/// PAUSE image button (transparent background, outline only). Sends the Pause key. A short tap is held for at least 0.1 s so the game never misses it.
+/// PPSSPP "I_DIR" filled arrow (two overlapping translucent pentagons), drawn as vectors so it is always sharp.
+/// The coordinates are the Up arm in a unit square; the other arms are rotated copies. It lights up behind the outline while a direction is pressed.
+private struct ArrowGlow: View {
+    let rotation: Double      // 0 = Up, 90 = Right, 180 = Down, 270 = Left
+    let glow: Double          // PPSSPP: white at 50 % of the button opacity
+    private static let outer = [CGPoint(x: 0.3623, y: 0.0285), CGPoint(x: 0.3623, y: 0.2912), CGPoint(x: 0.5002, y: 0.4115), CGPoint(x: 0.6377, y: 0.2912), CGPoint(x: 0.6377, y: 0.0285)]
+    private static let inner = [CGPoint(x: 0.3924, y: 0.0586), CGPoint(x: 0.3924, y: 0.2713), CGPoint(x: 0.5018, y: 0.3688), CGPoint(x: 0.6108, y: 0.2713), CGPoint(x: 0.6108, y: 0.0586)]
+
+    var body: some View {
+        // PPSSPP's picture has alpha 0.67 and 0.89 where the two pentagons overlap; scale both by `glow`
+        let a = 0.67 * glow, b = 0.89 * glow
+        let innerAlpha = 1 - (1 - b) / (1 - a)
+        return GeometryReader { g in
+            ZStack {
+                shape(Self.outer, g.size).fill(Color.white.opacity(a))
+                shape(Self.inner, g.size).fill(Color.white.opacity(innerAlpha))
+            }
+        }
+        .rotationEffect(.degrees(rotation))
+    }
+
+    private func shape(_ pts: [CGPoint], _ s: CGSize) -> Path {
+        Path { p in
+            p.move(to: CGPoint(x: pts[0].x * s.width, y: pts[0].y * s.height))
+            for q in pts.dropFirst() { p.addLine(to: CGPoint(x: q.x * s.width, y: q.y * s.height)) }
+            p.closeSubpath()
+        }
+    }
+}
+
+/// PPSSPP "I_RECT" filled rectangle (two overlapping translucent rectangles) centred on the PAUSE outline; drawn as vectors so it is always sharp.
+private struct RectGlow: View {
+    let glow: Double          // PPSSPP: white at 50 % of the button opacity
+    var body: some View {
+        // PPSSPP's picture has alpha 0.67 and 0.89 where the two rectangles overlap; scale both by `glow`
+        let a = 0.67 * glow, b = 0.89 * glow
+        let innerAlpha = 1 - (1 - b) / (1 - a)
+        return GeometryReader { g in
+            ZStack {
+                Rectangle().fill(Color.white.opacity(a))
+                    .frame(width: g.size.width * 0.9616, height: g.size.height * 0.9258)
+                Rectangle().fill(Color.white.opacity(innerAlpha))
+                    .frame(width: g.size.width * 0.8600, height: g.size.height * 0.6564)
+            }
+            .frame(width: g.size.width, height: g.size.height)
+        }
+    }
+}
+
+/// PAUSE image button (PPSSPP Start-button look: rectangle outline + label; transparent background). Sends the Pause key. A short tap is held for at least 0.1 s so the game never misses it.
 struct PauseButton: View {
     let key: Int32
     @State private var held = false
@@ -129,10 +183,15 @@ struct PauseButton: View {
     @State private var token = 0
 
     var body: some View {
-        Image("PauseButton")
-            .resizable()
-            .scaledToFit()
-            .opacity(held ? 0.80 : 0.32)       // same as the action-button outline (idle 0.32, pressed 0.80)
+        ZStack {
+            RectGlow(glow: 0.5)                // PPSSPP Start-button glow: the filled rectangle lights up while pressed
+                .opacity(held ? 1 : 0)
+            Image("PauseButton")
+                .resizable()
+                .scaledToFit()
+                .opacity(held ? 0.80 : 0.32)   // same as the action-button outline (idle 0.32, pressed 0.80)
+        }
+        .aspectRatio(1264.0 / 496.0, contentMode: .fit)   // = the picture's shape, so the glow lines up with it
             .padding(10)                       // bigger touch target than the picture itself
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)

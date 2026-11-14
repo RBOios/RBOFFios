@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "dpad_up_fill.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
