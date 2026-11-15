@@ -1,5 +1,6 @@
 /* DirectDraw 7 / DirectInput 8 / DirectSound HLE (headless reference implementation) */
 #include "dxshared.h"
+#include "state.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -672,4 +673,30 @@ void dsound_register(void){
     static Iface dn={"IDirectSoundNotify",4,dn_m,dn_impl};
     vt_ds=make_vtable(&ds); vt_dsb=make_vtable(&sb); vt_notify=make_vtable(&dn);
     hle_register("DSOUND.dll","Ordinal11",3,ds_Create);
+}
+
+/* ---------------- save state ---------------- */
+void dx_state(StateIO *io){
+    st_tag(io,"DXS0");
+    /* surfaces: pixels live in guest memory; host-side caches (texture cache, colour-key mask, GPU generations) are dropped and rebuilt on demand */
+    for(int i=0;i<MAXS;i++){
+        Surf t=S[i];
+        if(!io->load){ t.cache=NULL; t.keymask=NULL; t.cache_ok=0; t.cache_cap=0; t.cgen=t.ggen=t.ggen_k=0; }
+        STX(io,t);
+        if(io->load){
+            if(S[i].used){ free(S[i].cache); free(S[i].keymask); }
+            t.cache=NULL; t.keymask=NULL; t.cache_ok=0; t.cache_cap=0; t.cgen=t.ggen=t.ggen_k=0; t.locked=0;
+            S[i]=t;
+        }
+    }
+    STX(io,disp_w); STX(io,disp_h); STX(io,disp_bpp); STX(io,disp_set); STX(io,pr_l); STX(io,pr_t); STX(io,pr_r); STX(io,pr_b); STX(io,primary_id);
+    STX(io,vt_dd); STX(io,vt_surf); STX(io,dd_obj); STX(io,zseq_ctr); STX(io,vt_clip); STX(io,vt_pal);
+    STX(io,vt_di); STX(io,vt_dev); STX(io,di_obj); STX(io,dev_kind); STX(io,ndev);     /* keystate is live input: not saved */
+    STX(io,SB); STX(io,vt_ds); STX(io,vt_dsb); STX(io,vt_notify); STX(io,ds_obj);
+    STX(io,last_tick_us); STX(io,tick_carry);
+    if(io->load){
+        /* drop queued audio (it belongs to the old timeline) and re-pace the frame limiter from now */
+        __atomic_store_n(&ring_tail,__atomic_load_n(&ring_head,__ATOMIC_ACQUIRE),__ATOMIC_RELEASE);
+        mv_tail=mv_head; last_vb=0; hp_lut_ok=0;
+    }
 }

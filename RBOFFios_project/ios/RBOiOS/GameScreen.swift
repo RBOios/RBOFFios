@@ -80,6 +80,9 @@ struct GameScreen: View {
                 VStack { HStack { VolumeControl(); Spacer() }; Spacer() }.padding(.leading, 6).padding(.top, 2)
                     .opacity(pad.controllerConnected ? 0 : 1).allowsHitTesting(!pad.controllerConnected)
             }
+            if host != nil && !finished {   // 퀵 저장 / 불러오기 (슬롯 1개), 음량 아이콘 오른쪽. 게임패드를 연결해도 계속 보임
+                VStack { HStack { QuickStateBar(); Spacer() }; Spacer() }.padding(.leading, 56).padding(.top, 6)
+            }
             if showOverlay {
                 VStack {
                     HStack {

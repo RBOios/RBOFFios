@@ -41,6 +41,14 @@ void rbo_get_stats2(int *frames, double *present_ms_total, double *idle_ms_total
  * one per line. Call once per interval (it keeps its own snapshot). UTF-8, returns length. */
 int  rbo_get_prof(char *out, int n);
 int  rbo_audio_pull(int16_t *stereo, int frames);
+/* Quick save / load (one file per slot). The request is carried out asynchronously by the emulator thread: poll rbo_state_result().
+ * op: 1 = save, 2 = load. Returns 0 if accepted, <0 if busy / bad op. */
+int  rbo_state_request(int op, const char *path);
+/* 0 = no request yet, 1 = working, 2 = saved, 3 = loaded, <0 = failed. rbo_state_message() is a short Korean status text for the last result. */
+int  rbo_state_result(void);
+const char *rbo_state_message(void);
+/* Header of a saved file: unix time and frame counter. Returns 0 if the file exists and is a state file. */
+int  rbo_state_info(const char *path, int64_t *unix_time, int *frames);
 #ifdef __cplusplus
 }
 #endif

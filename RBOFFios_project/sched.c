@@ -1,5 +1,6 @@
 /* Cooperative green threads for the guest: switch only at blocking calls and frame boundaries. */
 #include "hle.h"
+#include "state.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -12,6 +13,11 @@ extern int sched_multi;
 int g_blocked=0;            /* set by wait calls that could not complete */
 static int streak=0;
 
+extern int g_switch;
+void sched_state(StateIO *io){
+    st_tag(io,"SCH0"); STX(io,th); STX(io,nth); STX(io,cur); STX(io,streak); STX(io,sched_multi);
+    if(io->load){ g_blocked=0; g_switch=0; }
+}
 int sched_nthreads(void){ return nth; }
 int sched_current(void){ return cur; }
 uint64_t *sched_deadline_ptr(int *waiting){ *waiting=th[cur].waiting; return &th[cur].deadline; }

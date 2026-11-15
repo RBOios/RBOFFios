@@ -15,6 +15,7 @@
  * RBO_NOHOOK=1 disables everything (used by test_hooks for A/B comparison).
  */
 #include "hle.h"
+#include "state.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,7 @@ static uint32_t sc_desc=0, sc_lut=0;
 static void scratch_init(void){
     if(!sc_desc){ sc_desc=ga_alloc(0x80,1); sc_lut=ga_alloc(0x900,1); }
 }
+void hooks_state(StateIO *io){ st_tag(io,"HOK0"); STX(io,sc_desc); STX(io,sc_lut); }
 #define LUT(ch,v) rd16(sc_lut+0x1a+0x200u*(ch)+2u*(uint32_t)(v))
 
 static int range_ok(uint64_t a,uint64_t n){ return n==0 || (a<MEM_SIZE && a+n<=MEM_SIZE); }

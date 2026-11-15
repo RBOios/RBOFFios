@@ -1,4 +1,5 @@
 #include "hle.h"
+#include "state.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -121,6 +122,11 @@ static void h_SHGetPathFromIDListA(void){ strcpy((char*)gmem+A(1),".\\"); RET(1)
 static void h_RegFail(void){ RET(2); }
 static void h_RegClose(void){ RET(0); }
 
+void win_state(StateIO *io){
+    st_tag(io,"WIN0");
+    STX(io,cls); STX(io,ncls); STX(io,main_hwnd); STX(io,main_proc); STX(io,win_w); STX(io,win_h); STX(io,activated);
+    STX(io,cursor_count); STX(io,timers); STX(io,pq); STX(io,pq_n);
+}
 #define R(dll,name,n,fn) hle_register(dll,name,n,fn)
 void win_register(void){
     const char *U="USER32.dll", *G="GDI32.dll", *I="IMM32.dll";

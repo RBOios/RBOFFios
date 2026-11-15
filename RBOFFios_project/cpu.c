@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "state.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -759,10 +760,14 @@ int cpu_prof_report(char *out,int n){
 }
 
 extern volatile int g_paused; void hle_pause_wait(void);
+void state_service(void);
+extern volatile int g_state_req;
+void cpu_state(StateIO *io){ st_tag(io,"CPU0"); STX(io,cpu); STX(io,next_slice); STX(io,prof_next); }
 extern volatile int g_cheat_flag; void cheat_service(void);
 void cpu_run(uint32_t stop_eip){
     while(!cpu.halted){
         if(cpu.eip==stop_eip) return;
+        if(g_state_req&&g_nest==0) state_service();   /* save/load requested by the host: only at the top level, between two guest instructions */
         if(g_paused&&g_nest==0) hle_pause_wait();
         if(g_cheat_flag&&g_nest==0) cheat_service();   /* trainer functions: queued cheat requests / frozen values */   /* app is in the background: stand still between two guest instructions */
         if(sched_multi && g_nest==0 && cpu.icount>=next_slice){ next_slice=cpu.icount+131072; sched_switch(); }

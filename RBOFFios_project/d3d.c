@@ -1,5 +1,6 @@
 /* Direct3D 7 HLE with a small software rasterizer (reference implementation for validation) */
 #include "dxshared.h"
+#include "state.h"
 #if defined(__APPLE__) && !defined(RBO_NO_GPU) && !defined(RBO_GPU)
 #define RBO_GPU 1
 #endif
@@ -747,4 +748,21 @@ void d3d_register(void){
     vb_impl[3]=vb_Lock; vb_impl[4]=vb_ok;
     static Iface t={"IDirect3D7",T_N,t_m,t_impl}, dv={"IDirect3DDevice7",DVN,dv_m,dv_impl}, vb={"IDirect3DVertexBuffer7",VBN,vb_m,vb_impl};
     vt_d3d=make_vtable(&t); vt_dev=make_vtable(&dv); vt_vb=make_vtable(&vb);
+}
+
+/* ---------------- save state ---------------- */
+void d3d_state_flush(void){
+#ifdef RBO_GPU
+    if(g_res&&g_res_newer) res_download();     /* the GPU copy of the render target is the newer one: write it back to guest memory first */
+#endif
+}
+void d3d_state(StateIO *io){
+    st_tag(io,"D3D0");
+    STX(io,D); STX(io,vt_d3d); STX(io,vt_dev); STX(io,vt_vb); STX(io,d3d_obj); STX(io,dev_obj);
+    if(io->load){
+#ifdef RBO_GPU
+        g_res=NULL; g_res_valid=0; g_res_newer=0; pol_frame=-1; pol_use=0; pol_trips=0; pol_off_until=0; pol_px=0; pol_prev_px=0;
+#endif
+        ntris=0;
+    }
 }

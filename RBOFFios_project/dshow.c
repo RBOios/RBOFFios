@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include "dxshared.h"
+#include "state.h"
 #include "pl_mpeg.h"
 #include <string.h>
 #include <strings.h>
@@ -251,6 +252,15 @@ static const MDef vw_m[]={MD("QueryInterface",3),MD("AddRef",1),MD("Release",1),
 #define CNT(a) ((int)(sizeof(a)/sizeof((a)[0])))
 static hle_fn graph_impl[32], mc_impl[32], mev_impl[32], mpos_impl[32], aud_impl[32], vw_impl[64], seek_impl[32], bv_impl[48];
 
+int dshow_graph_active(void){ return graph_obj!=0; }
+/* A movie decoder cannot be saved: it is closed on load (saving is refused while one is playing, see state.c). Music is streamed through DirectSound, so it is part of dx.c's state. */
+void dshow_state(StateIO *io){
+    st_tag(io,"DSH0");
+    STX(io,g_bgm); STX(io,vt_graph); STX(io,vt_mc); STX(io,vt_mev); STX(io,vt_mpos); STX(io,vt_aud); STX(io,vt_vw); STX(io,vt_seek); STX(io,vt_bv);
+    STX(io,graph_obj); STX(io,mc_obj); STX(io,mev_obj); STX(io,mpos_obj); STX(io,aud_obj); STX(io,vw_obj); STX(io,seek_obj); STX(io,bv_obj); STX(io,ev_handle);
+    STX(io,mv.notify_hwnd); STX(io,mv.notify_msg); STX(io,mv.notify_lparam); STX(io,mv.gain);
+    if(io->load) movie_close();
+}
 uint32_t dshow_make_graph(void){
     if(!graph_obj){
         for(int i=0;i<32;i++){ graph_impl[i]=mc_impl[i]=mev_impl[i]=mpos_impl[i]=aud_impl[i]=seek_impl[i]=d_zero; } for(int i=0;i<64;i++) vw_impl[i]=d_zero; for(int i=0;i<48;i++) bv_impl[i]=d_zero;

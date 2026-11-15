@@ -1,4 +1,5 @@
 #include "hle.h"
+#include "state.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -184,7 +185,7 @@ static uint32_t vnow(void){ if(g_fast){ vk++; return (uint32_t)vtime_ms(); } ret
 
 /* ---------------- files ---------------- */
 #define MAXH 256
-static struct { int fd; int used; char path[96]; } hs[MAXH];
+static struct { int fd; int used; char path[96]; char host[512]; int flags; } hs[MAXH];
 static uint32_t last_error=0;
 static int resolve_path_slow(const char *gpath,char *out,size_t outsz){
     char tmp[1024]; size_t n=0;
@@ -237,7 +238,7 @@ int resolve_path(const char *gpath,char *out,size_t outsz){
     }
     return ex;
 }
-static uint32_t newhandle(int fd){ for(int i=1;i<MAXH;i++) if(!hs[i].used){ hs[i].used=1; hs[i].fd=fd; hs[i].path[0]=0; return 0x1000+i*4; } return 0xFFFFFFFF; }
+static uint32_t newhandle(int fd){ for(int i=1;i<MAXH;i++) if(!hs[i].used){ hs[i].used=1; hs[i].fd=fd; hs[i].path[0]=0; hs[i].host[0]=0; hs[i].flags=0; return 0x1000+i*4; } return 0xFFFFFFFF; }
 static int hfd(uint32_t h){ int i=(h-0x1000)/4; if(h<0x1000||i<=0||i>=MAXH||!hs[i].used) return -1; return hs[i].fd; }
 
 static void h_CreateFileA(void){
@@ -249,7 +250,7 @@ static void h_CreateFileA(void){
     if(g_trace) fprintf(stderr,"[CreateFileA] %s -> %s (%s)\n",p,host,ex?"exists":"missing");
     int fd=open(host,flags,0644);
     if(fd<0){ last_error= ex?5:2; RET(0xFFFFFFFF); return; }
-    last_error=0; { uint32_t hh=newhandle(fd); int ii=(hh-0x1000)/4; if(hh!=0xFFFFFFFF) snprintf(hs[ii].path,sizeof hs[ii].path,"%s",p); RET(hh); }
+    last_error=0; { uint32_t hh=newhandle(fd); int ii=(hh-0x1000)/4; if(hh!=0xFFFFFFFF){ snprintf(hs[ii].path,sizeof hs[ii].path,"%s",p); snprintf(hs[ii].host,sizeof hs[ii].host,"%s",host); hs[ii].flags=flags; } RET(hh); }
 }
 static void h_ReadFile(void){
     int fd=hfd(A(0)); uint32_t buf=A(1), n=A(2), pr=A(3);
@@ -320,16 +321,17 @@ static void h_Sleep(void){
 void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else hle_sleep_us(250,1); }   /* 250us (was 1000): the guest clock is real time, a shorter nap lets the frame limiter wake closer to its target */
 static void h_GetTickCount(void){ RET(vnow()); }
 static void h_timeGetTime(void){ RET(vnow()); }
-static void h_QueryPerformanceCounter(void){ uint64_t t=now_us()-t0_us; wr32(A(0),(uint32_t)t); wr32(A(0)+4,(uint32_t)(t>>32)); RET(1); }
+static uint64_t qpc_fast=0;   /* RBO_FAST (test mode): a fully virtual, repeatable counter */
+static void h_QueryPerformanceCounter(void){ uint64_t t=now_us()-t0_us; if(g_fast){ qpc_fast+=20; t=vtime_ms()*1000ull-10000000ull+qpc_fast; } wr32(A(0),(uint32_t)t); wr32(A(0)+4,(uint32_t)(t>>32)); RET(1); }
 static void h_QueryPerformanceFrequency(void){ wr32(A(0),1000000); wr32(A(0)+4,0); RET(1); }
 static void fill_systime(uint32_t p,int local){
-    time_t t=time(NULL); struct tm tm; if(local)localtime_r(&t,&tm); else gmtime_r(&t,&tm);
+    time_t t=g_fast?(time_t)1700000000:time(NULL); struct tm tm; if(local)localtime_r(&t,&tm); else gmtime_r(&t,&tm);
     wr16(p,tm.tm_year+1900); wr16(p+2,tm.tm_mon+1); wr16(p+4,tm.tm_wday); wr16(p+6,tm.tm_mday);
     wr16(p+8,tm.tm_hour); wr16(p+10,tm.tm_min); wr16(p+12,tm.tm_sec); wr16(p+14,0);
 }
 static void h_GetSystemTime(void){ fill_systime(A(0),0); }
 static void h_GetLocalTime(void){ fill_systime(A(0),1); }
-static void h_GetSystemTimeAsFileTime(void){ uint64_t t=(uint64_t)time(NULL)*10000000ull+116444736000000000ull; wr32(A(0),(uint32_t)t); wr32(A(0)+4,(uint32_t)(t>>32)); }
+static void h_GetSystemTimeAsFileTime(void){ uint64_t t=(uint64_t)(g_fast?1700000000:time(NULL))*10000000ull+116444736000000000ull; wr32(A(0),(uint32_t)t); wr32(A(0)+4,(uint32_t)(t>>32)); }
 static void h_GetTimeZoneInformation(void){ memset(gmem+A(0),0,172); RET(0); }
 static void h_GetWindowsDirectoryA(void){ strcpy((char*)gmem+A(0),"C:\\WINDOWS"); RET(10); }
 
@@ -525,6 +527,65 @@ void hle_init(void){
     R("USER32.dll","CharUpperA",1,h_CharUpperA);
     (void)h_zero; (void)h_one; (void)scratch;
     win_register(); ddraw_register(); dinput_register(); dsound_register();
+}
+
+/* ---------------- save state ---------------- */
+uint32_t hle_heap_top(void){ return heap_top; }
+uint64_t hle_free_bytes(void){ uint64_t t=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next) t+=rd32(n->addr-16); return t; }
+uint32_t hle_free_blocks(void){ uint32_t c=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next) c++; return c; }
+uint32_t hle_tab_count(void){ return (uint32_t)ntab; }
+uint64_t hle_tab_hash(void){
+    uint64_t h=1469598103934665603ull;
+    for(int i=0;i<ntab;i++){
+        for(const char *p=tab[i].dll;*p;p++){ h^=(uint8_t)tolower((unsigned char)*p); h*=1099511628211ull; }
+        h^=0xFF; h*=1099511628211ull;
+        for(const char *p=tab[i].name;*p;p++){ h^=(uint8_t)*p; h*=1099511628211ull; }
+        h^=(uint32_t)tab[i].nargs; h*=1099511628211ull;
+    }
+    return h;
+}
+void hle_state(StateIO *io){
+    st_tag(io,"HLE0");
+    STX(io,heap_top); STX(io,last_error); STX(io,cmdline_ptr); STX(io,env_ptr);
+    /* free lists: the order inside a bucket decides which block is handed out next, so it is kept exactly */
+    uint32_t total=0;
+    if(!io->load){ for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next) total++; }
+    STX(io,total);
+    if(io->load){
+        for(int b=0;b<NBUCKET;b++){ FreeNode *n=freelist[b]; while(n){ FreeNode *x=n->next; free(n); n=x; } freelist[b]=NULL; }
+        static FreeNode *tail[NBUCKET]; memset(tail,0,sizeof tail);
+        for(uint32_t i=0;i<total&&!io->err;i++){
+            uint32_t bk,addr; STX(io,bk); STX(io,addr); if(io->err||bk>=NBUCKET) { io->err=ST_ERR_IO; break; }
+            FreeNode *n=malloc(sizeof *n); n->addr=addr; n->next=NULL;
+            if(tail[bk]) tail[bk]->next=n; else freelist[bk]=n; tail[bk]=n;
+        }
+    } else {
+        for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next){ uint32_t bk=(uint32_t)b, addr=n->addr; STX(io,bk); STX(io,addr); }
+    }
+    /* open files: path + mode + position (the host descriptor itself cannot be saved) */
+    for(int i=0;i<MAXH;i++){
+        int used=hs[i].used; int64_t off=0;
+        if(!io->load&&used&&hs[i].fd>=0){ off=(int64_t)lseek(hs[i].fd,0,SEEK_CUR); }
+        STX(io,used); STX(io,off);
+        char host[512]; int flags=hs[i].flags;
+        if(!io->load) memcpy(host,hs[i].host,sizeof host);
+        STX(io,flags); st_raw(io,host,sizeof host);
+        char gp[96]; if(!io->load) memcpy(gp,hs[i].path,sizeof gp); st_raw(io,gp,sizeof gp);
+        if(io->load){
+            if(hs[i].used&&hs[i].fd>=0) close(hs[i].fd);
+            hs[i].used=used; hs[i].fd=-1; hs[i].flags=flags; memcpy(hs[i].host,host,sizeof host); memcpy(hs[i].path,gp,sizeof gp);
+            if(used&&host[0]){
+                int fd=open(host,flags&~(O_CREAT|O_TRUNC|O_EXCL),0644);
+                if(fd>=0){ lseek(fd,(off_t)off,SEEK_SET); hs[i].fd=fd; }
+                else fprintf(stderr,"[state] cannot reopen %s\n",host);
+            }
+        }
+    }
+    STX(io,objs); STX(io,nobjs);
+    /* clocks: the guest clock continues from where it was saved */
+    uint64_t vus=0; if(!io->load) vus=now_us()-t0_us;
+    STX(io,vus); STX(io,vbase_ms); STX(io,vk); STX(io,g_frames); STX(io,qpc_fast);
+    if(io->load) t0_us=now_us()-vus;
 }
 
 /* Per-second profile for the on-screen overlay. Call from one thread (the UI timer). */

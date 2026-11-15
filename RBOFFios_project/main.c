@@ -36,6 +36,8 @@ void present_frame(const uint8_t *pix,int w,int h,int pitch,int bpp,uint32_t rm,
     present_frame_file(name,pix,w,h,pitch,bpp,rm,gm,bm);
 }
 
+static int g_save_frame=0, g_load_frame=0; static const char *g_save_file=NULL, *g_load_file=NULL;   /* test aids */
+int rbo_state_request(int op,const char *path);
 #ifndef RBO_LIBRARY
 /* ---------- checkpoint server: pause at a frame, accept commands over a FIFO, fork experiments ---------- */
 void dx_script_add(int rel,int dik,int down);
@@ -45,6 +47,8 @@ void dx_dump_primary(const char *path);
 static int g_server=0; static int g_next_pause=0; static FILE *g_cmd=NULL;
 static void reply(const char *s){ FILE *f=fopen("/tmp/rbo.out","a"); if(f){ fprintf(f,"%s\n",s); fclose(f);} }
 void ctl_frame_hook(void){
+    if(g_load_frame&&g_frames==g_load_frame){ g_load_frame=0; rbo_state_request(2,g_load_file); }   /* test aids: quick save / load at a given frame */
+    if(g_save_frame&&g_frames==g_save_frame){ g_save_frame=0; rbo_state_request(1,g_save_file); }
     if(!g_server || g_frames<g_next_pause) return;
     char line[2048];
     for(;;){
@@ -101,6 +105,7 @@ int rbo_run(const char *exe){
     cpu_run(0xFFFFFFFFu);
     rbo_hookcheck_report();
     fprintf(stderr,"[end] icount=%llu frames=%d\n",(unsigned long long)cpu.icount,g_frames);
+    { extern uint64_t state_mem_hash(void); fprintf(stderr,"[final] frames=%d memhash=%016llx\n",g_frames,(unsigned long long)state_mem_hash()); }
     return 0;
 }
 #ifndef RBO_LIBRARY
@@ -135,6 +140,9 @@ int main(int argc,char**argv){
         else if(!strcmp(argv[i],"--trace")) g_trace=1;
         else if(!strcmp(argv[i],"--server")&&i+1<argc){ g_server=1; g_next_pause=atoi(argv[++i]); }
         else if(!strcmp(argv[i],"--trace2")) g_trace=2;
+        else if(!strcmp(argv[i],"--state-save")&&i+2<argc){ g_save_frame=atoi(argv[i+1]); g_save_file=argv[i+2]; i+=2; }
+        else if(!strcmp(argv[i],"--state-load-at")&&i+2<argc){ g_load_frame=atoi(argv[i+1]); g_load_file=argv[i+2]; i+=2; }
+        else if(!strcmp(argv[i],"--state-load")&&i+1<argc){ rbo_state_request(2,argv[++i]); }
         else if(!strcmp(argv[i],"--alarm")&&i+1<argc){ signal(SIGALRM,on_alarm); alarm(atoi(argv[++i])); }
         else exe=argv[i];
     }
