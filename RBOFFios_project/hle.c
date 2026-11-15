@@ -427,8 +427,10 @@ static void h_WaitForSingleObject(void){
     { static int n=0; if(g_trace&&n++<12) fprintf(stderr,"[wait] block h=%08x to=%u ret=%08x frame %d obj=%d\n",h,to,rd32(cpu.r[ESP]),g_frames,obj_of(h)?obj_of(h)->type:-1); }
     g_retry=1;
 }
+static struct { int th; uint32_t n,all,to,h[8]; } dbg_wfm;
 static void h_WaitForMultipleObjects(void){
     uint32_t n=A(0), hp=A(1), all=A(2), to=A(3);
+    dbg_wfm.th=sched_current(); dbg_wfm.n=n; dbg_wfm.all=all; dbg_wfm.to=to; for(uint32_t i=0;i<n&&i<8;i++) dbg_wfm.h[i]=rd32(hp+4*i);
     if(all){ int ok=1; for(uint32_t i=0;i<n;i++){ Obj *o=obj_of(rd32(hp+4*i)); uint32_t c; int st=sched_thread_status(rd32(hp+4*i),&c);
             int sig = o ? (o->type==1?o->signaled:o->count>0) : (st==1||st<0); if(!sig) ok=0; }
         if(ok){ for(uint32_t i=0;i<n;i++) wait_try(rd32(hp+4*i)); sched_set_waiting(0); RET(0); return; } }
@@ -443,12 +445,27 @@ static void h_CreateThread(void){
 }
 static void h_ExitThread(void){ sched_set_exit_code(A(0)); cpu.eip=THREAD_EXIT_MAGIC; cpu.r[EAX]=A(0); /* handled by cpu_run */ }
 static void h_TerminateThread(void){ RET(1); }
+void sched_dump(void); void ds_debug_dump(void); void ds_wake_all_notify(void);
+static void join_diag(void){
+    fprintf(stderr,"[join] main thread keeps polling GetExitCodeThread, the worker does not finish. Threads:\n"); sched_dump();
+    fprintf(stderr,"[join] last WaitForMultipleObjects: thread=%d n=%u waitAll=%u timeout=%u\n",dbg_wfm.th,dbg_wfm.n,dbg_wfm.all,dbg_wfm.to);
+    for(uint32_t i=0;i<dbg_wfm.n&&i<8;i++){ Obj *o=obj_of(dbg_wfm.h[i]);
+        fprintf(stderr,"   handle %08x type=%d signaled=%d manual=%d count=%d\n",dbg_wfm.h[i],o?o->type:-1,o?o->signaled:-1,o?o->manual:-1,o?o->count:-1); }
+    ds_debug_dump();
+}
 static void h_GetExitCodeThread(void){
+    static int join_polls=0;
     uint32_t c=259; int st=sched_thread_status(A(0),&c); if(A(1)) wr32(A(1),c);
-    /* The game joins a worker thread by polling this call in a tight loop (code@0x41ae80). Threads are cooperative and only switch at blocking
-       calls / frame boundaries, so while the thread is still running we must yield here - otherwise the worker never runs and the main thread
-       spins forever (frozen black screen, 0 fps). */
-    if(st==0 && sched_nthreads()>1){ g_blocked=1; g_switch=1; }
+    /* The game joins a worker thread (its DirectSound music-streaming thread, after IDirectSoundBuffer::Stop) by polling this call in a tight
+       loop (code@0x41ae80). Threads are cooperative and only switch at blocking calls / frame boundaries, so while the thread is still running
+       we must yield here - otherwise the worker never runs and the main thread spins forever (frozen black screen, 0 fps). */
+    if(st==0 && sched_nthreads()>1){
+        g_blocked=1; g_switch=1; join_polls++;
+        if(join_polls==20000) join_diag();                      /* once: what everybody is waiting for -> rbo_log.txt */
+        if(join_polls>=60000 && join_polls%60000==0){           /* deadlock: wake the worker through every DirectSound notification event */
+            fprintf(stderr,"[join] worker still alive after %d polls - signalling all DirectSound notify events\n",join_polls); ds_wake_all_notify();
+        }
+    } else join_polls=0;
     RET(1);
 }
 /* critical sections: RTL_CRITICAL_SECTION owner at +12 (thread id), recursion at +8 */

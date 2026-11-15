@@ -20,7 +20,8 @@ uint32_t make_vtable(Iface *ifc){
 extern int g_cur_idx;
 static uint32_t vt_dsb, vt_notify;
 void com_default(void){
-    fprintf(stderr,"[COM stub] %s -> S_OK\n",hle_name(g_cur_idx));
+    static unsigned char seen[4096];   /* log each stub only a few times: Poll alone used to write 200+ MB per session */
+    if(g_cur_idx<0||g_cur_idx>=4096||seen[g_cur_idx]<3){ if(g_cur_idx>=0&&g_cur_idx<4096) seen[g_cur_idx]++; fprintf(stderr,"[COM stub] %s -> S_OK\n",hle_name(g_cur_idx)); }
     RET(0);
 }
 void com_addref(void){ RET(1); }
@@ -572,6 +573,15 @@ static double cur_pos(SBuf*b){   /* position extrapolated to "now" without consu
     return p;
 }
 static uint32_t vt_notify=0;
+void ds_wake_all_notify(void){ for(int i=0;i<512;i++) if(SB[i].used) for(int k=0;k<SB[i].nnotify;k++) hle_set_event(SB[i].nev[k]); }
+void ds_debug_dump(void){
+    int n=0; for(int i=0;i<512;i++) if(SB[i].used) n++;
+    fprintf(stderr,"[DSound] %d buffers in use; with notifications:\n",n);
+    for(int i=0;i<512;i++) if(SB[i].used&&SB[i].nnotify){ SBuf *b=&SB[i];
+        fprintf(stderr,"   buf %d playing=%d loop=%d size=%u pos=%.0f refs=%d notify=%d:",i,b->playing,b->looping,b->size,b->pos,b->refs,b->nnotify);
+        for(int k=0;k<b->nnotify;k++) fprintf(stderr," [off=%08x ev=%08x]",b->noff[k],b->nev[k]);
+        fprintf(stderr,"\n"); }
+}
 static void dn_SetNotificationPositions(void){
     SBuf *b=sb_of(A(0)); uint32_t n=A(1), arr=A(2); if(n>16) n=16; b->nnotify=(int)n;
     for(uint32_t i=0;i<n;i++){ b->noff[i]=rd32(arr+8*i); b->nev[i]=rd32(arr+8*i+4); if(g_trace) fprintf(stderr,"[DSound] notify buf %d off=%u ev=%08x\n",(int)(b-SB),b->noff[i],b->nev[i]); }
