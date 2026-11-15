@@ -58,6 +58,11 @@ static void *thread_main(void *arg){
 int rbo_start(const char *root,const char *exe,const RboCallbacks *cb){
     if(running) return -1;
     crash_install(root);
+    {   /* emulator messages ([DShow], [Movie], [MessageBoxA]...) go to Documents/rbo_log.txt (Files app > RBO), overwritten on every start */
+        static int log_done=0;
+        if(!log_done){ const char *home=getenv("HOME"); char lp[1100];
+            if(home){ snprintf(lp,sizeof lp,"%s/Documents/rbo_log.txt",home); if(freopen(lp,"w",stderr)){ setvbuf(stderr,NULL,_IONBF,0); log_done=1; } } }
+    }
     g_root=strdup(root); snprintf(exe_path,sizeof exe_path,"%s/%s",root,exe);
     if(cb) cbs=*cb; else memset(&cbs,0,sizeof cbs);
     g_host_present=cbs.present?(void(*)(void*,const uint32_t*,int,int))cbs.present:NULL; g_host_ctx=cbs.ctx; g_stop_req=0; g_paused=0; rbo_cheat_reset(); g_audio_ring_on=1;
