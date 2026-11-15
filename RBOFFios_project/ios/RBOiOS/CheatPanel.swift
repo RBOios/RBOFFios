@@ -1,14 +1,15 @@
 import SwiftUI
 
 /// PC 트레이너(rbo_ex3_trainer)의 기능: HP/SP/스킬 포인트/스탯 포인트/화살/돈.
-/// 고정 = 지금 값을 계속 유지, 채우기 = 그 값으로 설정(HP·SP), + = 현재 값에 더하기(나머지). ×N 버튼으로 양을 10배씩 바꿈.
+/// 고정 = 지금 값을 계속 유지, 채우기 = 그 값으로 설정(HP·SP), + = 현재 값에 더하기(나머지).
+/// 채우기/+ 칸을 누르면 숫자 입력창이 떠서 원하는 값(0~9999)을 적을 수 있고, 옆의 "적용" 버튼을 누르면 그 값으로 실행됩니다.
 /// 확장팩 3(RBO_Ex3.exe)에서만 동작하고, 다른 실행 파일에서는 값이 "—"로 보이며 아무 일도 일어나지 않습니다.
 struct CheatButton: View {
     let open: Bool
     var body: some View {
         // PAUSE 버튼과 같은 모양(사각 테두리 + 글자, 투명 배경). 크기는 PAUSE 그림과 같은 비율의 작은 버전.
         ZStack {
-            Rectangle().stroke(Color.white.opacity(open ? 0.80 : 0.32), lineWidth: 2)
+            Rectangle().strokeBorder(Color.white.opacity(open ? 0.80 : 0.32), lineWidth: 2)   // 테두리를 안쪽으로 그려서 PAUSE 그림과 바깥 크기가 같음
             GeometryReader { g in
                 Text("치트").font(.system(size: g.size.height * 0.50, weight: .bold))
                     .foregroundColor(Color.white.opacity(open ? 0.80 : 0.32))
@@ -32,10 +33,9 @@ struct CheatPanel: View {
         Item(name: "화살", base: 10, setsValue: false),
         Item(name: "돈", base: 10, setsValue: false),
     ]
-    private let mults = [1, 10, 100, 1000]
     @State private var values: [Int32] = Array(repeating: -1, count: 6)
     @State private var mask: Int32 = 0
-    @State private var multIdx: [Int] = Array(repeating: 0, count: 6)
+    @State private var amounts: [Int] = [0, 0, 0, 0, 0, 0]   // 버튼에 표시·적용되는 값 (눌러서 바꿈)
     private let poll = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
 
     static let width: CGFloat = 344
@@ -63,7 +63,29 @@ struct CheatPanel: View {
         .onReceive(poll) { _ in refresh() }
     }
 
-    private func amount(_ i: Int) -> Int { items[i].base * mults[multIdx[i]] }
+    private func amount(_ i: Int) -> Int { amounts[i] }
+
+    /// 숫자 입력창(UIAlertController: iOS 15에서도 동작). 확인은 값만 저장하고, 실행은 옆의 적용 버튼이 함.
+    private func askAmount(_ i: Int) {
+        let it = items[i]
+        let ac = UIAlertController(title: "\(it.name) \(it.setsValue ? "채우기" : "더하기")",
+                                   message: "0 ~ 9999 · 입력 후 옆의 적용 버튼을 누르면 실행돼요", preferredStyle: .alert)
+        ac.addTextField { tf in
+            tf.keyboardType = .numberPad
+            tf.text = "\(self.amounts[i])"
+            tf.clearsOnBeginEditing = true
+        }
+        ac.addAction(UIAlertAction(title: "취소", style: .cancel))
+        ac.addAction(UIAlertAction(title: "확인", style: .default) { _ in
+            let digits = String((ac.textFields?.first?.text ?? "").filter { $0.isNumber }.prefix(4))   // 최대 9,999
+            guard let v = Int(digits) else { return }
+            self.amounts[i] = v
+        })
+        var top = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }.first { $0.isKeyWindow }?.rootViewController
+        while let next = top?.presentedViewController { top = next }
+        top?.present(ac, animated: true)
+    }
 
     private func row(_ i: Int) -> some View {
         let frozen = (mask >> Int32(i)) & 1 == 1
@@ -76,10 +98,12 @@ struct CheatPanel: View {
                 rbo_cheat_freeze(Int32(i), frozen ? 0 : 1)
                 mask ^= Int32(1) << Int32(i)
             }
-            chip(items[i].setsValue ? "채우기 \(amount(i))" : "+\(amount(i))", on: false, width: 84) {
-                if items[i].setsValue { rbo_cheat_set(Int32(i), Int32(amount(i))) } else { rbo_cheat_add(Int32(i), Int32(amount(i))) }
+            chip("+ \(amount(i))", on: false, width: 82) {
+                askAmount(i)
             }
-            chip("×\(mults[multIdx[i]])", on: false, width: 46) { multIdx[i] = (multIdx[i] + 1) % mults.count }
+            chip("적용", on: false, width: 46) {
+                if items[i].setsValue { rbo_cheat_set(Int32(i), Int32(amounts[i])) } else { rbo_cheat_add(Int32(i), Int32(amounts[i])) }
+            }
         }
         .frame(height: 32)
     }
