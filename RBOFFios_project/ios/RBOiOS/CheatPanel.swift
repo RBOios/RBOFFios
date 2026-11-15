@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// PC 트레이너(rbo_ex3_trainer)의 기능: HP/SP/스킬 포인트/스탯 포인트/화살/돈.
-/// 고정 = 지금 값을 계속 유지, 채우기 = 그 값으로 설정(HP·SP), + = 현재 값에 더하기(나머지).
+/// HP·SP = 입력한 값으로 설정, 나머지 = 현재 값에 더하기.
 /// 채우기/+ 칸을 누르면 숫자 입력창이 떠서 원하는 값(0~9999)을 적을 수 있고, 옆의 "적용" 버튼을 누르면 그 값으로 실행됩니다.
 /// 확장팩 3(RBO_Ex3.exe)에서만 동작하고, 다른 실행 파일에서는 값이 "—"로 보이며 아무 일도 일어나지 않습니다.
 struct CheatButton: View {
@@ -34,11 +34,10 @@ struct CheatPanel: View {
         Item(name: "돈", base: 10, setsValue: false),
     ]
     @State private var values: [Int32] = Array(repeating: -1, count: 6)
-    @State private var mask: Int32 = 0
     @State private var amounts: [Int] = [0, 0, 0, 0, 0, 0]   // 버튼에 표시·적용되는 값 (눌러서 바꿈)
     private let poll = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
 
-    static let width: CGFloat = 344
+    static let width: CGFloat = 275
     static let height: CGFloat = 36 + 6 * 36 + 14
 
     var body: some View {
@@ -88,17 +87,12 @@ struct CheatPanel: View {
     }
 
     private func row(_ i: Int) -> some View {
-        let frozen = (mask >> Int32(i)) & 1 == 1
         return HStack(spacing: 5) {
             Text(items[i].name).font(.system(size: 13, weight: .semibold)).foregroundColor(Color.white.opacity(0.85))
                 .frame(width: 46, alignment: .leading)
             Text(values[i] < 0 ? "—" : "\(values[i])").font(.system(size: 13, design: .monospaced)).foregroundColor(Color.white.opacity(0.85))
                 .frame(width: 74, alignment: .trailing)
-            chip(frozen ? "고정중" : "고정", on: frozen, width: 52) {
-                rbo_cheat_freeze(Int32(i), frozen ? 0 : 1)
-                mask ^= Int32(1) << Int32(i)
-            }
-            chip("+ \(amount(i))", on: false, width: 82) {
+            chip("+ \(amount(i))", on: false, width: 70) {
                 askAmount(i)
             }
             chip("적용", on: false, width: 46) {
@@ -120,6 +114,5 @@ struct CheatPanel: View {
 
     private func refresh() {
         for i in 0..<6 { values[i] = Int32(rbo_cheat_get(Int32(i))) }
-        mask = Int32(rbo_cheat_frozen_mask())
     }
 }
