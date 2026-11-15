@@ -443,7 +443,14 @@ static void h_CreateThread(void){
 }
 static void h_ExitThread(void){ sched_set_exit_code(A(0)); cpu.eip=THREAD_EXIT_MAGIC; cpu.r[EAX]=A(0); /* handled by cpu_run */ }
 static void h_TerminateThread(void){ RET(1); }
-static void h_GetExitCodeThread(void){ uint32_t c=259; sched_thread_status(A(0),&c); if(A(1)) wr32(A(1),c); RET(1); }
+static void h_GetExitCodeThread(void){
+    uint32_t c=259; int st=sched_thread_status(A(0),&c); if(A(1)) wr32(A(1),c);
+    /* The game joins a worker thread by polling this call in a tight loop (code@0x41ae80). Threads are cooperative and only switch at blocking
+       calls / frame boundaries, so while the thread is still running we must yield here - otherwise the worker never runs and the main thread
+       spins forever (frozen black screen, 0 fps). */
+    if(st==0 && sched_nthreads()>1){ g_blocked=1; g_switch=1; }
+    RET(1);
+}
 /* critical sections: RTL_CRITICAL_SECTION owner at +12 (thread id), recursion at +8 */
 static void h_InitCS(void){ memset(gmem+A(0),0,24); }
 static void h_EnterCS(void){
