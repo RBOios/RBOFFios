@@ -42,6 +42,7 @@ typedef struct {
     int running;         /* IMediaControl::Run was called and Stop was not (paused counts as running) */
     int paused, ended;
     int w,h; double duration; int rate;
+    double played; int frames;   /* watchdog: guest seconds played since Run / video frames decoded */
     uint64_t last_us;    /* guest clock at the last pump */
     uint32_t *bgra;      /* converted current frame */
     double gain;         /* IBasicAudio volume as linear gain */
@@ -54,17 +55,21 @@ static Movie mv = { .gain = 1.0 };
 
 static int is_movie_path(const char *p){
     const char *dot=strrchr(p,'.'); if(!dot) return 0;
-    return !strcasecmp(dot,".mpg")||!strcasecmp(dot,".mpeg")||!strcasecmp(dot,".mpe")||!strcasecmp(dot,".m1v")||!strcasecmp(dot,".mpv");
+    /* other video containers are routed here too: they cannot be decoded, so RenderFile fails and the game moves on
+       (treated as music they would "play" silently and EC_COMPLETE would never arrive -> endless black screen) */
+    static const char *ext[]={".mpg",".mpeg",".mpe",".m1v",".mpv",".dat",".avi",".wmv",".asf",".mp4",".mov",".m4v",".bik",".ogv",".webm",".mkv",".flv"};
+    for(size_t i=0;i<sizeof ext/sizeof *ext;i++) if(!strcasecmp(dot,ext[i])) return 1;
+    return 0;
 }
 static void movie_close(void){
     if(mv.plm){ plm_destroy(mv.plm); mv.plm=NULL; }
     free(mv.bgra); mv.bgra=NULL; free(mv.rs); mv.rs=NULL; mv.rs_cap=0;
-    mv.open=mv.running=mv.paused=mv.ended=0; mv.ev_pending=0; mv.last_us=0; dx_movie_audio_clear();
+    mv.open=mv.running=mv.paused=mv.ended=0; mv.ev_pending=0; mv.last_us=0; mv.played=0; mv.frames=0; dx_movie_audio_clear();
 }
 static void on_video(plm_t *p,plm_frame_t *f,void *u){
     (void)p;(void)u;
     if(!mv.bgra||f->width!=(unsigned)mv.w||f->height!=(unsigned)mv.h) return;
-    plm_frame_to_bgra(f,(uint8_t*)mv.bgra,mv.w*4);
+    plm_frame_to_bgra(f,(uint8_t*)mv.bgra,mv.w*4); mv.frames++;
     dx_host_submit(mv.bgra,mv.w,mv.h);
 }
 static void on_audio(plm_t *p,plm_samples_t *s,void *u){
@@ -112,8 +117,18 @@ void dshow_movie_pump(void){
     double dt=(double)(now-mv.last_us)/1e6; mv.last_us=now;
     if(dt<=0) return; if(dt>0.1) dt=0.1;     /* after a stall do not fast-forward through the movie */
     plm_decode(mv.plm,dt);
+    mv.played+=dt;
     ds_tick();
-    if(plm_has_ended(mv.plm)){
+    /* watchdog: a movie that never reports its end (damaged tail, no decodable video, duration unknown) would leave the game
+       waiting for EC_COMPLETE on a black screen forever - end it by force */
+    int stuck=0;
+    if(!plm_has_ended(mv.plm)){
+        if(mv.duration>0 && mv.played>mv.duration+3.0) stuck=1;
+        else if(mv.frames==0 && mv.played>3.0) stuck=1;
+        else if(mv.played>900.0) stuck=1;
+        if(stuck) fprintf(stderr,"[Movie] watchdog: no end after %.1fs (duration %.1fs, %d frames) - forcing EC_COMPLETE\n",mv.played,mv.duration,mv.frames);
+    }
+    if(stuck || plm_has_ended(mv.plm)){
         mv.ended=1; mv.ev_pending=1;
         if(g_trace||1) fprintf(stderr,"[Movie] ended at %.2fs\n",plm_get_time(mv.plm));
         if(mv.notify_hwnd) win_post_message(mv.notify_hwnd,mv.notify_msg,0,mv.notify_lparam);
@@ -152,7 +167,7 @@ static void g_RenderFile(void){
 }
 static void mc_Run(void){
     if(mv.open){
-        if(mv.paused) mv.paused=0; else if(!mv.running){ mv.running=1; mv.last_us=0; mv.ended=0; }
+        if(mv.paused) mv.paused=0; else if(!mv.running){ mv.running=1; mv.last_us=0; mv.ended=0; mv.played=0; mv.frames=0; }
         g_bgm.playing=1; RET(0); return;
     }
     g_bgm.playing=1; fprintf(stderr,"[DShow] Run  (%s) vol=%d\n",g_bgm.path,g_bgm.volume); bgm_host_play(g_bgm.path,g_bgm.volume); RET(0);
@@ -172,7 +187,7 @@ static void mpos_get_Duration(void){ wr_double(A(1),mv.open?mv.duration:0.0); RE
 static void mpos_get_CurrentPosition(void){ wr_double(A(1),mv.open?movie_time():0.0); RET(0); }
 static void movie_rewind(void){
     if(!mv.open) return;
-    plm_rewind(mv.plm); mv.ended=0; mv.ev_pending=0; mv.last_us=0; mv.rs_pos=0; dx_movie_audio_clear();
+    plm_rewind(mv.plm); mv.ended=0; mv.ev_pending=0; mv.last_us=0; mv.played=0; mv.frames=0; mv.rs_pos=0; dx_movie_audio_clear();
 }
 static void mpos_put_CurrentPosition(void){   /* (this, double) - only "back to the start" is supported */
     double t; memcpy(&t,gmem+cpu.r[ESP]+8,8);
