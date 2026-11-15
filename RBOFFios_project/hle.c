@@ -546,6 +546,10 @@ uint64_t hle_tab_hash(void){
 }
 void hle_state(StateIO *io){
     st_tag(io,"HLE0");
+    /* the game folder at save time: open files are stored with their full host path, which changes when the app is reinstalled (the app
+       container has a new id) or the game folder is moved, so on load the old folder prefix is replaced by the current one */
+    char saved_root[512]; if(!io->load) snprintf(saved_root,sizeof saved_root,"%s",g_root);
+    STX(io,saved_root);
     STX(io,heap_top); STX(io,last_error); STX(io,cmdline_ptr); STX(io,env_ptr);
     /* free lists: the order inside a bucket decides which block is handed out next, so it is kept exactly */
     uint32_t total=0;
@@ -572,6 +576,10 @@ void hle_state(StateIO *io){
         STX(io,flags); st_raw(io,host,sizeof host);
         char gp[96]; if(!io->load) memcpy(gp,hs[i].path,sizeof gp); st_raw(io,gp,sizeof gp);
         if(io->load){
+            { size_t rl=strlen(saved_root); while(rl>1&&saved_root[rl-1]=='/') rl--;
+              if(rl>0&&host[0]&&!strncmp(host,saved_root,rl)&&(host[rl]=='/'||host[rl]==0)){
+                  size_t cl=strlen(g_root); while(cl>1&&g_root[cl-1]=='/') cl--;
+                  char t[512]; snprintf(t,sizeof t,"%.*s%s",(int)cl,g_root,host+rl); snprintf(host,sizeof host,"%s",t); } }
             if(hs[i].used&&hs[i].fd>=0) close(hs[i].fd);
             hs[i].used=used; hs[i].fd=-1; hs[i].flags=flags; memcpy(hs[i].host,host,sizeof host); memcpy(hs[i].path,gp,sizeof gp);
             if(used&&host[0]){

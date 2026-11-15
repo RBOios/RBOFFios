@@ -6,8 +6,14 @@
 #include <unistd.h>
 
 #define MAXTH 16
-typedef struct { CPU ctx; int alive; uint32_t handle; uint32_t exit_code; int waiting; uint64_t deadline; } Thread;
+typedef struct { CPU ctx; int alive; uint32_t handle; uint32_t exit_code; int waiting; uint64_t deadline; uint32_t stk, teb; } Thread;
 static Thread th[MAXTH]={[0]={.alive=1}};
+/* Slots of finished threads are reused (the game starts a new music-streaming thread at every change of BGM, and the table used to fill up
+   after a few stage cycles: from then on CreateThread failed and there was no BGM any more). Handles stay unique, and the exit codes of the
+   most recently finished threads are remembered so that a late GetExitCodeThread on an old handle still works. */
+static uint32_t th_serial=0;
+#define DEAD_N 32
+static struct { uint32_t handle, code; } dead_log[DEAD_N]; static uint32_t dead_n=0;
 static int nth=1, cur=0;
 extern int sched_multi;
 int g_blocked=0;            /* set by wait calls that could not complete */
@@ -15,7 +21,7 @@ static int streak=0;
 
 extern int g_switch;
 void sched_state(StateIO *io){
-    st_tag(io,"SCH0"); STX(io,th); STX(io,nth); STX(io,cur); STX(io,streak); STX(io,sched_multi);
+    st_tag(io,"SCH0"); STX(io,th); STX(io,nth); STX(io,cur); STX(io,streak); STX(io,sched_multi); STX(io,th_serial); STX(io,dead_log); STX(io,dead_n);
     if(io->load){ g_blocked=0; g_switch=0; }
 }
 int sched_nthreads(void){ return nth; }
@@ -29,19 +35,26 @@ static uint32_t make_teb(uint32_t stack_top,uint32_t stack_low){
     return t;
 }
 uint32_t sched_create(uint32_t start,uint32_t param){
-    if(nth>=MAXTH) return 0;
-    Thread *t=&th[nth]; memset(t,0,sizeof *t);
+    int slot=-1;
+    for(int i=1;i<nth;i++) if(!th[i].alive){ slot=i; break; }
+    if(slot<0){
+        if(nth>=MAXTH){ fprintf(stderr,"[thread] table full: %d threads alive, CreateThread fails\n",nth-1); return 0; }
+        slot=nth;
+    } else { dead_log[dead_n%DEAD_N].handle=th[slot].handle; dead_log[dead_n%DEAD_N].code=th[slot].exit_code; dead_n++; }
+    Thread *t=&th[slot]; memset(t,0,sizeof *t);
     uint32_t sz=0x40000, stk=ga_alloc(sz,1), top=stk+sz-16;
     CPU c; memset(&c,0,sizeof c); c.fcw=0x27F;
-    c.fs_base=make_teb(top,stk);
+    c.fs_base=make_teb(top,stk); t->stk=stk; t->teb=c.fs_base;
     c.r[ESP]=top-8; wr32(c.r[ESP],THREAD_EXIT_MAGIC); wr32(c.r[ESP]+4,param);
     c.eip=start;
-    t->ctx=c; t->alive=1; t->exit_code=259; t->handle=0x4000+nth*4;
-    if(g_trace) fprintf(stderr,"[thread] created #%d start=%08x param=%08x\n",nth,start,param);
-    nth++; sched_multi=1; return t->handle;
+    t->ctx=c; t->alive=1; t->exit_code=259; t->handle=0x4000+th_serial*4; th_serial++;
+    if(g_trace) fprintf(stderr,"[thread] created #%d start=%08x param=%08x\n",slot,start,param);
+    if(slot==nth) nth++;
+    sched_multi=1; return t->handle;
 }
 int sched_thread_status(uint32_t handle,uint32_t *code){
     for(int i=1;i<nth;i++) if(th[i].handle==handle){ if(code) *code=th[i].exit_code; return th[i].alive?0:1; }
+    for(uint32_t k=0;k<DEAD_N&&k<dead_n;k++) if(dead_log[k].handle==handle){ if(code) *code=dead_log[k].code; return 1; }
     return -1;
 }
 void sched_set_exit_code(uint32_t code){ th[cur].exit_code=code; }
@@ -51,8 +64,12 @@ void sched_thread_exit(void){
     if(g_trace) fprintf(stderr,"[thread] #%d exited\n",cur);
     g_blocked=0; g_switch=0; streak=0;
     /* switch away permanently */
-    int n=cur; do{ n=(n+1)%nth; }while(!th[n].alive&&n!=0);
+    int old=cur, n=cur; do{ n=(n+1)%nth; }while(!th[n].alive&&n!=0);
     uint64_t ic=cpu.icount; cpu=th[n].ctx; cpu.icount=ic; cur=n;
+    /* the finished thread's stack and TEB are no longer needed (we are on another thread's stack now) */
+    uint32_t stk=th[old].stk, teb=th[old].teb; th[old].stk=th[old].teb=0;
+    if(stk) ga_free(stk);
+    if(teb) ga_free(teb);
 }
 void sched_switch(void){
     if(nth==1){ g_blocked=0; return; }

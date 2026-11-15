@@ -20,7 +20,7 @@
 #include <zlib.h>
 
 #define ST_MAGIC   0x31535452u      /* "RTS1" */
-#define ST_VERSION 2
+#define ST_VERSION 4
 #define PAGE       4096u
 #define MEM_END_MARK 0xFFFFFFFFu
 
