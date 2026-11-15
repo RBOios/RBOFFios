@@ -45,7 +45,7 @@ targets:
       - sdk: MetalKit.framework
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.rboff.ios
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.rbo.ios
         GCC_PREPROCESSOR_DEFINITIONS: "RBO_LIBRARY=1 RBO_GPU=1"
         OTHER_CFLAGS: "-O3 -Wno-unused-function -Wno-misleading-indentation"
         HEADER_SEARCH_PATHS: "$(SRCROOT)/.."
