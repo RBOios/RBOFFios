@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 화면 왼쪽 위(음량 아이콘 오른쪽)의 "저장 / 불러오기" 버튼 (슬롯 1개).
+/// 화면 왼쪽 위(음량 아이콘 오른쪽)의 "저장 / 불러오기" 버튼 (슬롯 1개, 세로로 저장 → 불러오기, 흰색 아이콘).
 /// 엔진이 게임 전체 상태(메모리·CPU·사운드·화면)를 파일 하나로 저장했다가 그대로 되돌립니다.
 /// 파일: Files 앱 > RBO 폴더의 rbo_quicksave1.state
 struct QuickStateBar: View {
@@ -16,9 +16,9 @@ struct QuickStateBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                chip("저장") { start(1) }
-                chip("불러오기") { prepareLoad() }
+            VStack(alignment: .leading, spacing: 6) {   // 저장 아래에 불러오기
+                iconButton("SaveIcon") { start(1) }
+                iconButton("LoadIcon") { prepareLoad() }
             }
             if let m = message {
                 Text(m).font(.system(size: 13, weight: .semibold)).foregroundColor(Color.white)
@@ -34,6 +34,18 @@ struct QuickStateBar: View {
             Text(loadInfo)
         }
         .onReceive(poll) { _ in check() }
+    }
+
+    /// 흰색 아이콘 버튼 (음량 아이콘과 같은 톤). 아이콘은 Assets의 SaveIcon / LoadIcon (22pt = 66px @3x).
+    private func iconButton(_ name: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(name)
+                .resizable().interpolation(.none)
+                .frame(width: 22, height: 22)
+                .opacity(working ? 0.25 : 0.55)
+                .frame(width: 44, height: 40).contentShape(Rectangle())
+        }
+        .disabled(working)
     }
 
     private func chip(_ title: String, _ action: @escaping () -> Void) -> some View {
