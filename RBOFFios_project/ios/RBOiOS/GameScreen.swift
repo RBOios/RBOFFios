@@ -76,6 +76,10 @@ struct GameScreen: View {
         ZStack {
             if let host = host { MetalGameView(host: host).ignoresSafeArea() }
             if !pad.controllerConnected { VirtualPad(gameAspect: CGFloat(screenSize.aspect)) }   // hidden while a Bluetooth/MFi gamepad is connected
+            if host != nil {   // 음량 조절 (왼쪽 위). 블루투스 패드가 연결되면 아이콘을 숨김 (저장된 음량은 숨겨진 동안에도 그대로 적용됨)
+                VStack { HStack { VolumeControl(); Spacer() }; Spacer() }.padding(.leading, 6).padding(.top, 2)
+                    .opacity(pad.controllerConnected ? 0 : 1).allowsHitTesting(!pad.controllerConnected)
+            }
             if showOverlay {
                 VStack {
                     HStack {

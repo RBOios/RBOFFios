@@ -76,6 +76,8 @@ int rbo_start(const char *root,const char *exe,const RboCallbacks *cb){
     return 0;
 }
 void rbo_set_paused(int p){ g_paused=p?1:0; }
+extern volatile float g_vol_master, g_vol_bgm;
+void rbo_set_volume(float master,float bgm){ if(master<0)master=0; if(master>1)master=1; if(bgm<0)bgm=0; if(bgm>1)bgm=1; g_vol_master=master; g_vol_bgm=bgm; }
 void rbo_stop(void){ g_stop_req=1; }
 int rbo_is_running(void){ return running; }
 void rbo_set_key(int dik,int down){ dx_set_key(dik,down); }

@@ -531,6 +531,7 @@ static void sb_advance(SBuf*b,int nout,float *acc){
         b->pos+=step;
     }
 }
+volatile float g_vol_master=1.0f, g_vol_bgm=1.0f;   /* set from the UI (rbo_set_volume): whole mix / streamed music buffers */
 void ds_tick(void){
     if(!wav_init) wav_open();
     uint64_t now=hle_now_us(); if(!last_tick_us){ last_tick_us=now; return; }
@@ -538,10 +539,13 @@ void ds_tick(void){
     uint64_t dt=now-last_tick_us; if(dt>500000) dt=500000;
     double nf=dt*(double)OUT_RATE/1e6+tick_carry; int n=(int)nf; tick_carry=nf-n; last_tick_us=now;
     if(n<=0) return;
-    float *acc=calloc(2*(size_t)n,sizeof(float));
+    float *acc=calloc(2*(size_t)n,sizeof(float)), *acc2=NULL;
+    float vbgm=g_vol_bgm, vmaster=g_vol_master;
     for(int i=0;i<512;i++) if(SB[i].used){
         SBuf *b=&SB[i]; b->t_tick=now; double p0=b->pos; int was=b->playing;
-        sb_advance(b,n,acc);
+        /* the game streams its music through buffers that have notification positions: mix those separately so the BGM can have its own volume */
+        float *dst=acc; if(b->nnotify&&vbgm!=1.0f){ if(!acc2) acc2=calloc(2*(size_t)n,sizeof(float)); dst=acc2; }
+        sb_advance(b,n,dst);
         if(b->nnotify && was){
             double p1=b->pos; int wrapped=(p1<p0)||(!b->playing);
             for(int k=0;k<b->nnotify;k++){ uint32_t off=b->noff[k];
@@ -550,7 +554,9 @@ void ds_tick(void){
                 if(hit) hle_set_event(b->nev[k]); }
         }
     }
+    if(acc2){ for(int i=0;i<2*n;i++) acc[i]+=acc2[i]*vbgm; free(acc2); }
     for(int i=0;i<n && mv_tail!=mv_head;i++,mv_tail++){ acc[2*i]+=mv_fifo[(mv_tail%MV_FIFO)*2]; acc[2*i+1]+=mv_fifo[(mv_tail%MV_FIFO)*2+1]; }
+    if(vmaster!=1.0f) for(int i=0;i<2*n;i++) acc[i]*=vmaster;
     if(g_audio_ring_on){
         int16_t *o2=malloc(4*(size_t)n);
         for(int i=0;i<2*n;i++){ float v=acc[i]; if(v>1)v=1; if(v<-1)v=-1; o2[i]=(int16_t)(v*32767); }

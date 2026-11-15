@@ -21,6 +21,8 @@ int  rbo_is_running(void);
 void rbo_set_key(int dik, int down);
 /* 1 = pause the emulation (call when the app leaves the foreground), 0 = continue. Safe to call at any time from any thread. */
 void rbo_set_paused(int paused);
+/* Output volume 0..1: master = whole mix, bgm = additional factor for the streamed music. */
+void rbo_set_volume(float master, float bgm);
 /* Trainer functions (from the PC trainer rbo_ex3_trainer). Only for RBO_Ex3.exe; for other executables every call does nothing and
  * rbo_cheat_get returns -1. id: 0 HP, 1 SP, 2 skill points, 3 stat points, 4 arrows, 5 money. All writes are carried out by the emulator thread.
  * set = write the value, add = add to the current value, freeze = keep the value it has now (on=1) until freeze(id,0). Safe from any thread. */
