@@ -137,9 +137,47 @@ volatile int g_paused=0;
 extern volatile int g_stop_req;
 void hle_pause_wait(void){
     uint64_t s=now_us(), before=hle_now_us();
-    while(g_paused&&!g_stop_req) usleep(20000);
+    while(g_paused&&!g_stop_req){ usleep(20000); }
     uint64_t d=now_us()-s; t0_us+=d;
     if(getenv("RBO_PAUSE_DBG")) fprintf(stderr,"[pause] paused %llu ms, guest clock before=%llu after=%llu\n",(unsigned long long)(d/1000),(unsigned long long)before,(unsigned long long)hle_now_us());
+}
+
+/* ---------------- cheats: the functions of the PC trainer "rbo_ex3_trainer" (Cheat Engine table, RBO_Ex3.exe only) ----------------
+   Every cheat is one 32-bit value at a fixed address (trainer: "rbo_ex3.exe+offset", image base 0x400000).
+   Requests come from the UI thread and are carried out by the emulator thread (cheat_service, called from cpu_run), so the guest never sees a
+   half-written value. A frozen value is written back on every pass, like the trainer's freezer timer. */
+static const uint32_t cheat_addr[6]={0x2503A5Cu,0x2503A64u,0x2510ECCu,0x2510A00u,0xADEB38u,0xADFED8u};   /* HP, SP, skill pts, stat pts, arrows, money */
+typedef struct { int op,id,val; } CheatReq;                /* op: 1 set, 2 add, 3 freeze on (captures the current value), 4 freeze off */
+static CheatReq cq[32]; static volatile unsigned cq_h=0, cq_t=0;
+volatile int g_cheat_flag=0;                               /* non-zero: cheat_service has work (queued requests or frozen values) */
+static volatile int cheat_mask=0; static int cheat_fval[6];
+static int cheat_ok(void){ return gmem&&g_code_lo==0x401000u&&g_code_hi==0x486000u; }   /* the offsets are those of RBO_Ex3.exe */
+static int32_t cheat_clamp(int64_t v){ return v<0?0:(v>999999999?999999999:(int32_t)v); }
+int rbo_cheat_get(int id){ if(id<0||id>=6||!cheat_ok()) return -1; return (int)*(volatile uint32_t*)(gmem+cheat_addr[id]); }
+int rbo_cheat_frozen_mask(void){ return cheat_mask; }
+static void cheat_push(int op,int id,int val){
+    if(id<0||id>=6||!cheat_ok()) return;
+    unsigned h=cq_h; if(h-cq_t>=32) return;               /* queue full: drop (the UI cannot produce requests that fast) */
+    cq[h%32]=(CheatReq){op,id,val}; __atomic_store_n(&cq_h,h+1,__ATOMIC_RELEASE); g_cheat_flag=1;
+}
+void rbo_cheat_set(int id,int value){ cheat_push(1,id,value); }
+void rbo_cheat_add(int id,int delta){ cheat_push(2,id,delta); }
+void rbo_cheat_freeze(int id,int on){ cheat_push(on?3:4,id,0); }
+void rbo_cheat_reset(void){ cq_t=cq_h; cheat_mask=0; g_cheat_flag=0; }   /* a new game starts: forget everything */
+void cheat_service(void){
+    if(!cheat_ok()) return;
+    while(cq_t!=__atomic_load_n(&cq_h,__ATOMIC_ACQUIRE)){
+        CheatReq r=cq[cq_t%32]; cq_t++;
+        uint32_t a=cheat_addr[r.id]; int32_t cur=(int32_t)rd32(a);
+        switch(r.op){
+        case 1: wr32(a,(uint32_t)cheat_clamp(r.val)); cheat_fval[r.id]=cheat_clamp(r.val); break;
+        case 2: { int32_t v=cheat_clamp((int64_t)cur+r.val); wr32(a,(uint32_t)v); cheat_fval[r.id]=v; } break;
+        case 3: cheat_fval[r.id]=cur; cheat_mask|=1<<r.id; break;
+        case 4: cheat_mask&=~(1<<r.id); break;
+        }
+    }
+    for(int i=0;i<6;i++) if(cheat_mask&(1<<i)) wr32(cheat_addr[i],(uint32_t)cheat_fval[i]);
+    if(!cheat_mask&&cq_t==cq_h) g_cheat_flag=0;
 }
 uint64_t hle_now_us(void){ if(g_fast) return vtime_ms()*1000ull; return now_us()-t0_us+10000000ull; }
 static uint32_t vnow(void){ if(g_fast){ vk++; return (uint32_t)vtime_ms(); } return (uint32_t)((now_us()-t0_us)/1000)+10000; }

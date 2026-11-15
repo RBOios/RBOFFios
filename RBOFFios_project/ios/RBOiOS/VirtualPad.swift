@@ -8,6 +8,7 @@ struct VirtualPad: View {
     private let dpadFrame = CGRect(x: 0.055, y: 0.560, width: 0.190, height: 0.315)
     // Game picture is drawn aspect-fit and centred in this shape (4:3 normally, 16:9 for the virtual PSP); the rest of the screen is black bars.
     private let gameAspect: CGFloat
+    @State private var showCheat = false    // 치트 패널(PC 트레이너 기능)이 열려 있는지
     init(gameAspect: CGFloat = 4.0 / 3.0) { self.gameAspect = gameAspect }
     // Round buttons, laid out in a diamond. Units: fractions of the screen height, relative to the cluster centre.
     private let buttons: [(label: String, key: Int32, dx: CGFloat, dy: CGFloat)] = [
@@ -60,6 +61,19 @@ struct VirtualPad: View {
                 PauseButton(key: DIK.one)
                     .frame(width: pauseWidth * h * ui)
                     .position(x: clusterCX, y: pauseTopMargin * h + ((pauseWidth * h * ui - 20) * 0.392 + 20) / 2)   // top right, above the button cluster
+                // 치트 버튼: PAUSE 바로 아래, 같은 크기(그림 비율도 같음)
+                let pauseW = pauseWidth * h * ui
+                let pauseH = (pauseW - 20) * 0.392 + 20
+                CheatButton(open: showCheat)
+                    .frame(width: pauseW)
+                    .position(x: clusterCX, y: pauseTopMargin * h + pauseH + pauseH / 2 - 8)
+                    .onTapGesture { showCheat.toggle() }
+                if showCheat {
+                    // 패널은 치트 버튼 왼쪽에 놓는 작은 카드 (게임은 계속 진행되고, 카드 밖 터치는 그대로 게임으로 전달됨)
+                    let px = max(CheatPanel.width / 2 + 8, clusterCX - pauseW / 2 - 8 - CheatPanel.width / 2)
+                    CheatPanel(close: { showCheat = false })
+                        .position(x: px, y: max(CheatPanel.height / 2 + 6, pauseTopMargin * h + CheatPanel.height / 2))
+                }
             }
             .frame(width: w, height: h)
         }

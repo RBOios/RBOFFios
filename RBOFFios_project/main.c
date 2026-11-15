@@ -108,7 +108,25 @@ int rbo_run(const char *exe){
 /* test aid: RBO_PAUSE_TEST=<ms until pause>:<ms paused> pauses and resumes the emulation from another thread, like the app going to the background */
 static void *pause_test_thread(void *a){ (void)a; int t1=0,t2=0; sscanf(getenv("RBO_PAUSE_TEST"),"%d:%d",&t1,&t2);
     extern volatile int g_paused; usleep(t1*1000); g_paused=1; usleep(t2*1000); g_paused=0; return NULL; }
+/* test aid: RBO_CHEAT_TEST=1 exercises the trainer functions from another thread (as the app's UI would) */
+#include "rbo_api.h"
+static void *cheat_test_thread(void *a){ (void)a; usleep(4000*1000);
+    extern uint8_t *gmem;
+    fprintf(stderr,"[cheat] ok? money=%d hp=%d\n",rbo_cheat_get(5),rbo_cheat_get(0));
+    rbo_cheat_set(5,1000); rbo_cheat_add(5,500); rbo_cheat_set(0,821); usleep(300*1000);
+    fprintf(stderr,"[cheat] after set/add: money=%d (want 1500) hp=%d (want 821)\n",rbo_cheat_get(5),rbo_cheat_get(0));
+    rbo_cheat_freeze(0,1); usleep(200*1000);
+    *(volatile uint32_t*)(gmem+0x2503A5C)=5;                 /* the game "hurts" the player */
+    usleep(300*1000);
+    fprintf(stderr,"[cheat] frozen hp after damage=%d (want 821) mask=%d\n",rbo_cheat_get(0),rbo_cheat_frozen_mask());
+    rbo_cheat_freeze(0,0); usleep(200*1000); *(volatile uint32_t*)(gmem+0x2503A5C)=7; usleep(300*1000);
+    fprintf(stderr,"[cheat] unfrozen hp after damage=%d (want 7) mask=%d\n",rbo_cheat_get(0),rbo_cheat_frozen_mask());
+    rbo_cheat_add(5,2000000000); usleep(300*1000);
+    fprintf(stderr,"[cheat] clamped money=%d (want 999999999)\n",rbo_cheat_get(5));
+    rbo_cheat_add(5,-2000000000); usleep(300*1000);
+    fprintf(stderr,"[cheat] floor money=%d (want 0)\n",rbo_cheat_get(5)); return NULL; }
 int main(int argc,char**argv){
+    if(getenv("RBO_CHEAT_TEST")){ pthread_t t; pthread_create(&t,NULL,cheat_test_thread,NULL); }
     if(getenv("RBO_PAUSE_TEST")){ pthread_t t; pthread_create(&t,NULL,pause_test_thread,NULL); }
     const char *exe=NULL; g_root="/home/claude/game";
     for(int i=1;i<argc;i++){

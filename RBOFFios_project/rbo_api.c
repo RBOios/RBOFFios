@@ -60,7 +60,7 @@ int rbo_start(const char *root,const char *exe,const RboCallbacks *cb){
     crash_install(root);
     g_root=strdup(root); snprintf(exe_path,sizeof exe_path,"%s/%s",root,exe);
     if(cb) cbs=*cb; else memset(&cbs,0,sizeof cbs);
-    g_host_present=cbs.present?(void(*)(void*,const uint32_t*,int,int))cbs.present:NULL; g_host_ctx=cbs.ctx; g_stop_req=0; g_paused=0; g_audio_ring_on=1;
+    g_host_present=cbs.present?(void(*)(void*,const uint32_t*,int,int))cbs.present:NULL; g_host_ctx=cbs.ctx; g_stop_req=0; g_paused=0; rbo_cheat_reset(); g_audio_ring_on=1;
     running=1;
     pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at,8u<<20);
 #ifdef __APPLE__
