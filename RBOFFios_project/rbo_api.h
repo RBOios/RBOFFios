@@ -13,7 +13,7 @@ typedef struct RboCallbacks {
     void (*finished)(void *ctx, int code);
 } RboCallbacks;
 
-/* game_root: folder that contains the game's exe files and DATA/. exe_name e.g. "RBO.exe", "RBO_Ex1.exe". Returns 0 on success. */
+/* game_root: folder that contains the game's exe files and DATA/. exe_name is "RBO_Ex3.exe" (the only supported executable). Returns 0 on success. */
 int  rbo_start(const char *game_root, const char *exe_name, const RboCallbacks *cb);
 void rbo_stop(void);
 int  rbo_is_running(void);

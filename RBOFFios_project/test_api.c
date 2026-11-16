@@ -14,7 +14,7 @@ static void on_finished(void *c,int code){ (void)c; fin=1; printf("finished code
 int main(int argc,char **argv){
     const char *root=argc>1?argv[1]:"/home/claude/game";
     RboCallbacks cb={0,on_present,on_finished};
-    if(rbo_start(root,"RBO.exe",&cb)){ puts("start failed"); return 1; }
+    if(rbo_start(root,"RBO_Ex3.exe",&cb)){ puts("start failed"); return 1; }
     long audio_frames=0; int16_t buf[1024*2]; int nonzero=0;
     for(int i=0;i<2000 && frames<1300;i++){ usleep(20000); int g=rbo_audio_pull(buf,1024); audio_frames+=g; for(int k=0;k<g*2;k++) if(buf[k]) nonzero++; }
     rbo_set_key(0x1E,1); usleep(100000); rbo_set_key(0x1E,0);
