@@ -50,3 +50,23 @@ hooks.c(신규), test_hooks.c(신규), hle.c(nargs==-2 raw 후크), main.c(설�
 - 사운드 버퍼에 참조 카운트를 추가: `CreateSoundBuffer`/`DuplicateSoundBuffer`는 1, `AddRef`/`QueryInterface`(같은 객체)는 +1, `Release`는 -1이고 0이 되면 슬롯과 게임 메모리를 반환합니다(복제본이 같은 데이터를 쓰는 동안은 메모리를 유지).
 - 이미 해제된 버퍼에 대한 `Release`는 무시, 해제된 객체로 들어오는 호출은 `sb_dummy`가 받아서 호스트 크래시가 나지 않습니다.
 - 슬롯이 가득 차면 `E_OUTOFMEMORY`를 돌려주고 로그(`all 512 slots in use`)를 남깁니다.
+
+## mm4 / mm3: float matrix multiplies (0x412b40, 0x412f00)
+
+After the loops above were hooked, the next hot spot in a busy stage is the game's own x87 matrix code (~35% of the sampled guest instructions):
+
+| hook | address | what it is |
+|---|---|---|
+| `hook_mm4_0x412b40` | `0x412b40`..`0x412d53` | `mm4(dst, A, B)` 4x4 float matrix multiply, cdecl |
+| `hook_mm3_0x412f00` | `0x412f00`..`0x412fe6` | `mm3(dst, A, B)` same style, 3x3 part + translation, cdecl |
+
+`hooks_mm.h` is **generated** by `gen_mm.py` from the exe's own code (translates `fld/fmul/fadd/faddp/fxch/fstp` into C `double` operations in the
+same order; loads and stores happen in the original order, so overlapping dst/A/B give the same result). Both hooks are installed only if the
+complete function body is byte-identical to the one the generator saw, and fall back to the original code when a pointer is out of range.
+
+Verification:
+* `make test_hooks_mm && ./test_hooks_mm code_412000.bin` - random matrices (normal, zero, denormal, inf, NaN, any bit pattern) with overlapping
+  dst/A/B; compares memory, eax/ecx/edx/esp and callee-saved registers against the interpreter. `code_412000.bin` = guest memory 0x412000..0x414000
+  (dump it from the exe or from a save state). Only NaN *payload* bits may differ (the host compiler may swap the operands of a multiplication).
+* `RBO_HOOKCHECK=1` also shadow-checks mm4/mm3 on real game data; `RBO_HOOKMASK` bits: 1 conv, 2 rect, 4 scan, 8 mm4, 16 mm3.
+* The compiler must not fuse multiply-add: hooks_mm.h sets `#pragma STDC FP_CONTRACT OFF` (clang) / `fp-contract=off` (gcc).
