@@ -35,6 +35,7 @@ void gpu_rt_upload(const uint32_t *argb,int w,int h); /* ARGB8888 (0xAARRGGBB) p
 void gpu_rt_read(uint32_t *argb);                     /* waits for the GPU, then copies the render target out (ARGB8888) */
 void gpu_tex_upload(int slot,const uint32_t *argb,const uint8_t *keymask,int w,int h);   /* keymask: 0/1 per texel or NULL */
 void gpu_draw(const GpuState *st,const float *verts,int nverts);
+void gpu_submit(void);                                /* submit everything recorded so far, do not wait (the GPU overlaps with the guest) */
 void gpu_sync(void);                                  /* submit everything recorded so far and wait for it */
 
 /* counters since start: syncs, total wait ms, triangles' vertices, state changes */

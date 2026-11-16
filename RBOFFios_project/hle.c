@@ -368,7 +368,8 @@ static void h_Sleep(void){
         if(now<*dl){ g_retry=1; return; }
         sched_set_waiting(0); RET(0); return; }
     if(g_fast) vk+=(int)A(0); else hle_sleep_us(A(0)*1000u,0); RET(0); }
-void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else hle_sleep_us(250,1); }   /* 250us (was 1000): the guest clock is real time, a shorter nap lets the frame limiter wake closer to its target */
+static uint64_t idle_by_idx[PROF_MAX];   /* diagnostic: idle ticks by the HLE call that was running last (which wait is the guest sitting in) */
+void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else { if(g_cur_idx>=0&&g_cur_idx<PROF_MAX) idle_by_idx[g_cur_idx]++; hle_sleep_us(250,1); } }   /* 250us (was 1000): the guest clock is real time, a shorter nap lets the frame limiter wake closer to its target */
 static void h_GetTickCount(void){ RET(vnow()); }
 static void h_timeGetTime(void){ RET(vnow()); }
 static uint64_t qpc_fast=0;   /* RBO_FAST (test mode): a fully virtual, repeatable counter */
@@ -688,6 +689,11 @@ int hle_prof_report(char *out,int n,int topk){
             if(len<n) len+=snprintf(out+len,n-len,"\n%-24.24s %5.1fms/s %7.0f회/s",hle_name(best),ms,calls);
         }
     }
+    { static uint64_t pr_idle[PROF_MAX]; int b1=-1,b2=-1; uint64_t v1=0,v2=0;     /* the two HLE calls behind most idle ticks this second */
+      for(int i=0;i<nt;i++){ uint64_t dv=idle_by_idx[i]-pr_idle[i]; if(dv>v1){ v2=v1; b2=b1; v1=dv; b1=i; } else if(dv>v2){ v2=dv; b2=i; } }
+      for(int i=0;i<nt;i++) pr_idle[i]=idle_by_idx[i];
+      if(!first&&dw>0&&b1>=0&&len<n) len+=snprintf(out+len,n-len,"\n유휴틱 원인 %s %.0f회/s",hle_name(b1),(double)v1*(1e9/dw));
+      if(!first&&dw>0&&b2>=0&&len<n) len+=snprintf(out+len,n-len," · %s %.0f회/s",hle_name(b2),(double)v2*(1e9/dw)); }
     pr_wall=w; pr_hle=hle; for(int i=0;i<3;i++) pr_sl[i]=sl[i];
     for(int i=0;i<nt;i++){ pr_ns[i]=cns[i]; pr_calls[i]=ccalls[i]; }
     return len;

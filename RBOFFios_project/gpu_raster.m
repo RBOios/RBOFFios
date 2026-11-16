@@ -11,6 +11,8 @@
 #define MAXTEX      1024                /* 2 x MAXS in dx.c: one slot per DirectDraw surface + one for its colour-keyed variant */
 #define VB_VERTS    (96*1024)           /* vertex ring: 96K vertices * 32 bytes = 3 MB, reset after every sync */
 #define VERT_BYTES  32
+#define NVB         3                   /* vertex buffers in rotation: a submitted command buffer may still be reading one while the next is filled */
+#define SUBMIT_VERTS 768                /* hand the recorded draws to the GPU every ~256 triangles so it works while the guest keeps running */
 
 /* ---- uniforms: must match struct U in the shader (20 scalars, 80 bytes) ---- */
 typedef struct {
@@ -107,7 +109,11 @@ fragment float4 rbo_fs(VOut in [[stage_in]], constant U &u [[buffer(0)]],
 static id<MTLDevice>              g_dev;
 static id<MTLCommandQueue>        g_queue;
 static id<MTLFunction>            g_vfn, g_ffn;
-static id<MTLBuffer>              g_vb;
+static id<MTLBuffer>              g_vb[NVB];
+static id<MTLCommandBuffer>       g_vb_cb[NVB];            /* last command buffer that read each vertex buffer */
+static int                        g_vbi = 0;
+static id<MTLCommandBuffer>       g_last_cb;               /* newest submitted command buffer (the queue is serial: waiting for it waits for all) */
+static unsigned                   g_done_epoch = 0;        /* every epoch <= this has finished on the GPU (written by the completion handler) */
 static id<MTLTexture>             g_rt;
 static int                        g_rtw, g_rth;
 static id<MTLTexture>             g_tex[MAXTEX], g_key[MAXTEX];
@@ -199,8 +205,10 @@ int gpu_init(void) {
         if (!lib) { set_err("shader compile", e); return 0; }
         g_vfn = [lib newFunctionWithName:@"rbo_vs"]; g_ffn = [lib newFunctionWithName:@"rbo_fs"];
         if (!g_vfn || !g_ffn) { snprintf(g_err, sizeof g_err, "shader functions missing"); return 0; }
-        g_vb = [g_dev newBufferWithLength:(NSUInteger)VB_VERTS * VERT_BYTES options:MTLResourceStorageModeShared];
-        if (!g_vb) { snprintf(g_err, sizeof g_err, "vertex buffer"); return 0; }
+        for (int i = 0; i < NVB; i++) {
+            g_vb[i] = [g_dev newBufferWithLength:(NSUInteger)VB_VERTS * VERT_BYTES options:MTLResourceStorageModeShared];
+            if (!g_vb[i]) { snprintf(g_err, sizeof g_err, "vertex buffer"); return 0; }
+        }
         g_pipes = [[NSMutableDictionary alloc] init];
         g_dummy_tex = make_tex(MTLPixelFormatBGRA8Unorm, 1, 1); g_dummy_key = make_tex(MTLPixelFormatR8Unorm, 1, 1);
         if (!g_dummy_tex || !g_dummy_key) { snprintf(g_err, sizeof g_err, "dummy textures"); return 0; }
@@ -234,31 +242,58 @@ static void flush_run(void) {
     g_run_n = 0;
 }
 
-void gpu_sync(void) {
+/* Submit everything recorded so far WITHOUT waiting. The render target stays on the GPU; later passes load it again. */
+void gpu_submit(void) {
     if (!g_enc && !g_cb) { g_vtx_used = 0; g_have_state = 0; return; }
     @autoreleasepool {
         flush_run();
-        double t0 = now_ms();
         if (g_enc) { [g_enc endEncoding]; g_enc = nil; }
         if (g_cb) {
-            [g_cb commit]; [g_cb waitUntilCompleted];
-            if (g_cb.status == MTLCommandBufferStatusError) { set_err("command buffer", g_cb.error); g_dead = 1; }
-            g_cb = nil;
+            unsigned ep = g_epoch;
+            [g_cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+                if (cb.status == MTLCommandBufferStatusError) g_dead = 1;
+                unsigned cur = __atomic_load_n(&g_done_epoch, __ATOMIC_ACQUIRE);
+                while (ep > cur && !__atomic_compare_exchange_n(&g_done_epoch, &cur, ep, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
+            }];
+            [g_cb commit];
+            g_last_cb = g_cb; g_vb_cb[g_vbi] = g_cb; g_cb = nil;
+            g_vbi = (g_vbi + 1) % NVB;
+            g_epoch++;
         }
+    }
+    g_vtx_used = 0; g_have_state = 0;
+}
+
+/* Submit and wait until the GPU has finished everything (needed before the CPU touches the render target or a texture). */
+void gpu_sync(void) {
+    gpu_submit();
+    if (!g_last_cb) return;
+    @autoreleasepool {
+        double t0 = now_ms();
+        id<MTLCommandBuffer> cb = g_last_cb; g_last_cb = nil;
+        [cb waitUntilCompleted];
+        if (cb.status == MTLCommandBufferStatusError) { set_err("command buffer", cb.error); g_dead = 1; }
+        unsigned all = g_epoch - 1, cur = __atomic_load_n(&g_done_epoch, __ATOMIC_ACQUIRE);
+        while (all > cur && !__atomic_compare_exchange_n(&g_done_epoch, &cur, all, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
         g_wait_ms += now_ms() - t0; g_n_sync++;
     }
-    g_vtx_used = 0; g_have_state = 0; g_epoch++;
 }
 
 static void begin_pass(void) {
     if (g_enc) return;
+    if (g_vb_cb[g_vbi]) {                                           /* this vertex buffer was read by an earlier submission: make sure it is done */
+        if (g_vb_cb[g_vbi].status != MTLCommandBufferStatusCompleted && g_vb_cb[g_vbi].status != MTLCommandBufferStatusError) {
+            double t0 = now_ms(); [g_vb_cb[g_vbi] waitUntilCompleted]; g_wait_ms += now_ms() - t0; g_n_sync++;
+        }
+        g_vb_cb[g_vbi] = nil;
+    }
     g_cb = [g_queue commandBuffer];
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = g_rt;
     rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     g_enc = [g_cb renderCommandEncoderWithDescriptor:rp];
-    [g_enc setVertexBuffer:g_vb offset:0 atIndex:1];
+    [g_enc setVertexBuffer:g_vb[g_vbi] offset:0 atIndex:1];
     g_have_state = 0;
 }
 
@@ -292,7 +327,7 @@ void gpu_draw(const GpuState *st, const float *verts, int nverts) {
     while (off < nverts) {
         int n = nverts - off; n -= n % 3; if (n <= 0) break;
         if (n > VB_VERTS) n = VB_VERTS - (VB_VERTS % 3);
-        if (g_vtx_used + n > VB_VERTS) gpu_sync();                  /* ring full: submit what we have (the render target stays on the GPU) */
+        if (g_vtx_used + n > VB_VERTS) gpu_submit();                /* buffer full: submit what we have and continue in the next buffer (the render target stays on the GPU) */
         @autoreleasepool {
             begin_pass();
             if (!g_have_state || memcmp(&g_state, st, sizeof *st) != 0) {
@@ -301,8 +336,9 @@ void gpu_draw(const GpuState *st, const float *verts, int nverts) {
                 g_state = *st; g_have_state = 1;
             }
             if (g_run_n == 0) g_run_start = g_vtx_used;
-            memcpy((char *)[g_vb contents] + (size_t)g_vtx_used * VERT_BYTES, verts + (size_t)off * 8, (size_t)n * VERT_BYTES);
+            memcpy((char *)[g_vb[g_vbi] contents] + (size_t)g_vtx_used * VERT_BYTES, verts + (size_t)off * 8, (size_t)n * VERT_BYTES);
             g_run_n += n; g_vtx_used += n; g_n_verts += (unsigned long)n;
+            if (g_vtx_used >= SUBMIT_VERTS) gpu_submit();           /* let the GPU start on this part while the guest keeps generating the rest of the frame */
         }
         off += n;
     }
@@ -336,7 +372,7 @@ void gpu_rt_read(uint32_t *argb) {
 void gpu_tex_upload(int slot, const uint32_t *argb, const uint8_t *keymask, int w, int h) {
     if (!g_ok || slot < 0 || slot >= MAXTEX || w <= 0 || h <= 0) return;
     @autoreleasepool {
-        BOOL busy = (g_tex_epoch[slot] == g_epoch);                   /* bound by work that has not been submitted yet: must not be overwritten in place */
+        BOOL busy = (g_tex_epoch[slot] != 0 && g_tex_epoch[slot] > __atomic_load_n(&g_done_epoch, __ATOMIC_ACQUIRE));                   /* bound by work that has not been submitted yet: must not be overwritten in place */
         id<MTLTexture> t = g_tex[slot];
         if (!t || (int)t.width != w || (int)t.height != h || busy) { t = make_tex(MTLPixelFormatBGRA8Unorm, w, h); g_tex[slot] = t; g_tex_epoch[slot] = 0; }
         if (!t) return;
