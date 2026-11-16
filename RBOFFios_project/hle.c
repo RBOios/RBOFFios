@@ -14,7 +14,7 @@
 int g_trace=0;
 int g_retry=0; extern int g_blocked;
 int sched_nthreads(void); void sched_set_waiting(int w); uint64_t *sched_deadline_ptr(int *waiting); uint32_t sched_create(uint32_t start,uint32_t param); int sched_thread_status(uint32_t handle,uint32_t *code); void sched_set_exit_code(uint32_t code); int sched_current(void);
-int g_cur_idx=0;
+int g_cur_idx=0; uint32_t g_cur_ra=0; int g_cur_th=0;   /* last HLE call: guest return address and thread (diagnostics) */
 const char *g_root=".";
 int g_max_frames=0, g_frames=0;
 
@@ -52,7 +52,7 @@ void hle_dispatch_impl(uint32_t idx){
     if(g_trace>1) fprintf(stderr,"[hle] %s!%s(%08x,%08x,%08x,%08x)\n",e->dll,e->name,A(0),A(1),A(2),A(3));
     uint32_t ra=rd32(cpu.r[ESP]);
     uint32_t esp0=cpu.r[ESP];
-    g_cur_idx=(int)idx; g_retry=0;
+    g_cur_idx=(int)idx; g_cur_ra=ra; g_cur_th=sched_current(); g_retry=0;
     uint64_t pt0=now_ns(), pg0=g_prof_guest_ns, ps0=prof_sleep_total();
     e->fn();
     { uint64_t dt=now_ns()-pt0, inner=(g_prof_guest_ns-pg0)+(prof_sleep_total()-ps0), own=dt>inner?dt-inner:0;
@@ -368,8 +368,14 @@ static void h_Sleep(void){
         if(now<*dl){ g_retry=1; return; }
         sched_set_waiting(0); RET(0); return; }
     if(g_fast) vk+=(int)A(0); else hle_sleep_us(A(0)*1000u,0); RET(0); }
-static uint64_t idle_by_idx[PROF_MAX];   /* diagnostic: idle ticks by the HLE call that was running last (which wait is the guest sitting in) */
-void hle_idle_tick(void){ if(g_fast) vbase_ms+=1; else { if(g_cur_idx>=0&&g_cur_idx<PROF_MAX) idle_by_idx[g_cur_idx]++; hle_sleep_us(250,1); } }   /* 250us (was 1000): the guest clock is real time, a shorter nap lets the frame limiter wake closer to its target */
+typedef struct { uint32_t ra; int th, idx; uint64_t n, prev; } IdleRec;
+static IdleRec idle_tab[96];   /* diagnostic: idle ticks by (thread, guest return address of the last HLE call): which guest code is sitting in the wait */
+void hle_idle_tick(void){
+    if(g_fast){ vbase_ms+=1; return; }
+    IdleRec *r=NULL; for(int i=0;i<96;i++){ if(idle_tab[i].n==0&&!idle_tab[i].ra){ r=&idle_tab[i]; r->ra=g_cur_ra; r->th=g_cur_th; r->idx=g_cur_idx; break; }
+        if(idle_tab[i].ra==g_cur_ra&&idle_tab[i].th==g_cur_th){ r=&idle_tab[i]; break; } }
+    if(r) r->n++;
+    hle_sleep_us(250,1); }
 static void h_GetTickCount(void){ RET(vnow()); }
 static void h_timeGetTime(void){ RET(vnow()); }
 static uint64_t qpc_fast=0;   /* RBO_FAST (test mode): a fully virtual, repeatable counter */
@@ -689,11 +695,9 @@ int hle_prof_report(char *out,int n,int topk){
             if(len<n) len+=snprintf(out+len,n-len,"\n%-24.24s %5.1fms/s %7.0f회/s",hle_name(best),ms,calls);
         }
     }
-    { static uint64_t pr_idle[PROF_MAX]; int b1=-1,b2=-1; uint64_t v1=0,v2=0;     /* the two HLE calls behind most idle ticks this second */
-      for(int i=0;i<nt;i++){ uint64_t dv=idle_by_idx[i]-pr_idle[i]; if(dv>v1){ v2=v1; b2=b1; v1=dv; b1=i; } else if(dv>v2){ v2=dv; b2=i; } }
-      for(int i=0;i<nt;i++) pr_idle[i]=idle_by_idx[i];
-      if(!first&&dw>0&&b1>=0&&len<n) len+=snprintf(out+len,n-len,"\n유휴틱 원인 %s %.0f회/s",hle_name(b1),(double)v1*(1e9/dw));
-      if(!first&&dw>0&&b2>=0&&len<n) len+=snprintf(out+len,n-len," · %s %.0f회/s",hle_name(b2),(double)v2*(1e9/dw)); }
+    if(!first&&dw>0){ for(int k=0;k<3;k++){ int bi=-1; uint64_t bv=0; for(int i=0;i<96;i++){ uint64_t dv=idle_tab[i].n-idle_tab[i].prev; if(dv>bv){ bv=dv; bi=i; } }
+        if(bi<0||bv==0) break; if(len<n) len+=snprintf(out+len,n-len,"\n유휴틱 스레드%d %s 호출위치 %08x %.0f회/s",idle_tab[bi].th,hle_name(idle_tab[bi].idx),idle_tab[bi].ra,(double)bv*(1e9/dw)); idle_tab[bi].prev=idle_tab[bi].n; }
+      for(int i=0;i<96;i++) idle_tab[i].prev=idle_tab[i].n; }
     pr_wall=w; pr_hle=hle; for(int i=0;i<3;i++) pr_sl[i]=sl[i];
     for(int i=0;i<nt;i++){ pr_ns[i]=cns[i]; pr_calls[i]=ccalls[i]; }
     return len;

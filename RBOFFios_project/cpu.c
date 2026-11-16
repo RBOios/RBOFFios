@@ -748,12 +748,14 @@ int cpu_prof_report(char *out,int n){
     if(!out||n<=0) return 0; out[0]=0;
     for(int i=0;i<PROF_BLOCKS;i++){ d[i]=prof_hist[i]-prev[i]; prev[i]=prof_hist[i]; tot+=d[i]; }
     if(tot<8) return 0;
-    for(int k=0;k<3;k++){
+    for(int k=0;k<12;k++){
         int best=-1; uint32_t bv=0; for(int i=0;i<PROF_BLOCKS;i++) if(d[i]>bv){ bv=d[i]; best=i; }
-        if(best<0 || (uint64_t)bv*20<tot) break;                       /* ignore blocks under 5% */
+        if(best<0 || (uint64_t)bv*100<tot) break;                      /* ignore blocks under 1% */
         uint32_t a=g_code_lo+((uint32_t)best<<6), from=a>=g_code_lo+32?a-32:a;
-        if(len<n) len+=snprintf(out+len,n-len,"\n핫스팟 %08x %.0f%% 코드@%08x:",a,100.0*bv/tot,from);
-        for(int j=0;j<128 && len<n-3;j++) len+=snprintf(out+len,n-len,"%02x",gmem[from+j]);
+        if(k<3 && (uint64_t)bv*20>=tot){                               /* 5% or more: address + code bytes, as before */
+            if(len<n) len+=snprintf(out+len,n-len,"\n핫스팟 %08x %.0f%% 코드@%08x:",a,100.0*bv/tot,from);
+            for(int j=0;j<128 && len<n-3;j++) len+=snprintf(out+len,n-len,"%02x",gmem[from+j]);
+        } else if(len<n) len+=snprintf(out+len,n-len,"\n블록 %08x %.1f%%",a,100.0*bv/tot);   /* the code itself is static: read it from the exe / a save state */
         d[best]=0;
     }
     return len<n?len:n-1;
