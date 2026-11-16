@@ -480,7 +480,7 @@ static void h_WaitForSingleObject(void){
     g_retry=1;
 }
 static struct { int th; uint32_t n,all,to,h[8]; } dbg_wfm;
-static void h_WaitForMultipleObjects(void){
+static void wfm_impl(void){
     uint32_t n=A(0), hp=A(1), all=A(2), to=A(3);
     dbg_wfm.th=sched_current(); dbg_wfm.n=n; dbg_wfm.all=all; dbg_wfm.to=to; for(uint32_t i=0;i<n&&i<8;i++) dbg_wfm.h[i]=rd32(hp+4*i);
     if(all){ int ok=1; for(uint32_t i=0;i<n;i++){ Obj *o=obj_of(rd32(hp+4*i)); uint32_t c; int st=sched_thread_status(rd32(hp+4*i),&c);
@@ -490,6 +490,15 @@ static void h_WaitForMultipleObjects(void){
     if(to==0){ sched_set_waiting(0); RET(258); return; }
     if(wait_expired(to)){ sched_set_waiting(0); RET(258); return; }
     g_retry=1;
+}
+/* The game's DirectSound music thread loops WaitForMultipleObjects -> Lock -> fill/silence -> Unlock about a million times per second (perf log:
+   Lock/Unlock/WaitForMultipleObjects 1.0-1.1M calls/s, code@0x41a5e0-0x41a8ff = ~36% of all interpreted time). Because threads are cooperative and
+   only switch every 131072 instructions, that loop took half of the CPU from the main thread and the game dropped to ~40 fps whenever a stage got
+   busy. A completed wait on a worker thread now hands the CPU back to the other thread right away, so the loop runs once per slice
+   (~1-2K times/s) - far more than the few notify events per second that the stream needs. */
+static void h_WaitForMultipleObjects(void){
+    wfm_impl();
+    if(!g_retry && sched_nthreads()>1 && sched_current()!=0) g_switch=1;
 }
 static void h_CreateThread(void){
     uint32_t h=sched_create(A(2),A(3)); if(A(5)) wr32(A(5),0x1000+sched_nthreads());

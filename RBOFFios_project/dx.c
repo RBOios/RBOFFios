@@ -608,7 +608,8 @@ static void ds_CreateSoundBuffer(void){
 static void dsb_Lock(void){ /* (this, off, bytes, p1*, b1*, p2*, b2*, flags) */
     SBuf *b=sb_of(A(0)); uint32_t off=A(1), n=A(2);
     if(A(7)&2) n=b->size; if(A(7)&1) off=(uint32_t)cur_pos(b);
-    if(b->nnotify&&getenv("RBO_DSTRACE")){ static int lc=0; if(lc++<40) fprintf(stderr,"[DSound] frame %d Lock id=%d off=%u bytes=%u flags=%u size=%u pos=%.0f\n",g_frames,(int)(b-SB),off,n,A(7),b->size,cur_pos(b)); }
+    static int lk_env=-1; if(lk_env<0) lk_env=getenv("RBO_DSTRACE")!=NULL;
+    if(b->nnotify&&lk_env){ static int lc=0; if(lc++<40) fprintf(stderr,"[DSound] frame %d Lock id=%d off=%u bytes=%u flags=%u size=%u pos=%.0f\n",g_frames,(int)(b-SB),off,n,A(7),b->size,cur_pos(b)); }
     if(off>b->size) off=0; if(off+n>b->size) n=b->size-off;
     wr32(A(3),b->buf+off); wr32(A(4),n); if(A(5))wr32(A(5),0); if(A(6))wr32(A(6),0); RET(0);
 }
@@ -628,9 +629,11 @@ static void dsb_SetCurrentPosition(void){ SBuf *b=sb_of(A(0)); b->pos=A(1); RET(
 static void dsb_GetStatus(void){ SBuf *b=sb_of(A(0)); uint32_t st=0; if(b->playing) st|=1|(b->looping?4:0); wr32(A(1),st); RET(0); }
 static void dsb_Unlock(void){
     SBuf *b=sb_of(A(0)); uint32_t p1=A(1), n1=A(2);
-    { static FILE *raw=NULL; static int rawid=-1; const char *rp=getenv("RBO_DUMPSTREAM");
+    static int env_done=0, env_trace=0; static const char *env_dump=NULL;   /* getenv() on every Unlock cost ~50 ms/s at 1M calls/s */
+    if(!env_done){ env_done=1; env_trace=getenv("RBO_DSTRACE")!=NULL; env_dump=getenv("RBO_DUMPSTREAM"); }
+    { static FILE *raw=NULL; static int rawid=-1; const char *rp=env_dump;
       if(rp&&b->nnotify&&(rawid<0||rawid==(int)(b-SB))){ if(!raw){ raw=fopen(rp,"wb"); rawid=(int)(b-SB); } if(raw&&n1&&p1+n1<MEM_SIZE){ fwrite(gmem+p1,1,n1,raw); fflush(raw); } } }
-    if(g_trace>1||getenv("RBO_DSTRACE")){ uint64_t sum=0; for(uint32_t i=0;i<n1&&p1+i<MEM_SIZE;i++) sum+=gmem[p1+i];
+    if(g_trace>1||env_trace){ uint64_t sum=0; for(uint32_t i=0;i<n1&&p1+i<MEM_SIZE;i++) sum+=gmem[p1+i];
         static int cnt=0; if(b->nnotify && cnt++<60) fprintf(stderr,"[DSound] frame %d Unlock id=%d off=%u bytes=%u sum=%llu pos=%.0f play=%d\n",g_frames,(int)(b-SB),p1-b->buf,n1,(unsigned long long)sum,b->pos,b->playing); }
     RET(0);
 }
