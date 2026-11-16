@@ -78,14 +78,64 @@ void hle_dispatch_impl(uint32_t idx){
 static uint32_t heap_top=HEAP_START;
 typedef struct FreeNode { uint32_t addr; struct FreeNode *next; } FreeNode;
 #define NBUCKET 4096
+#define FIT_MIN   4096u      /* requests at least this big may reuse (and split) a larger free block */
+#define SPLIT_MIN 4096u      /* a split-off tail must hold at least this much */
 static FreeNode *freelist[NBUCKET];
 static uint32_t round_size(uint32_t s){ if(s<16)s=16; if(s<=2048) return (s+15)&~15u; return (s+4095)&~4095u; }
+static unsigned free_gen=0, coal_gen=~0u;    /* free_gen counts ga_free calls; the free lists are only re-merged when something was freed since the last merge */
+static int cmp_node_addr(const void *a,const void *b){ uint32_t x=(*(FreeNode *const*)a)->addr, y=(*(FreeNode *const*)b)->addr; return x<y?-1:x>y; }
+/* Merge neighbouring free blocks (a block of size S at address A ends at A+S; the next block's 16-byte header follows, so its payload starts at A+S+16).
+   Only pairs where at least one block is large are merged: runs of small blocks stay as they are so that exact-size reuse of small sizes keeps working. */
+static void coalesce_free(void){
+    unsigned n=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *x=freelist[b];x;x=x->next) n++;
+    coal_gen=free_gen; if(n<2) return;
+    FreeNode **arr=malloc(n*sizeof *arr); if(!arr) return;
+    unsigned k=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *x=freelist[b];x;x=x->next) arr[k++]=x;
+    qsort(arr,n,sizeof *arr,cmp_node_addr);
+    unsigned out=0;
+    for(unsigned i=0;i<n;i++){
+        if(out>0){
+            FreeNode *p=arr[out-1]; uint32_t ps=rd32(p->addr-16), cs=rd32(arr[i]->addr-16);
+            if(p->addr+ps+16==arr[i]->addr && (ps>=FIT_MIN||cs>=FIT_MIN)){
+                wr32(p->addr-16,ps+16+cs); free(arr[i]); continue;     /* p grows over arr[i] */
+            }
+        }
+        arr[out++]=arr[i];
+    }
+    if(out==n){ free(arr); return; }      /* nothing merged: leave the lists (and their order) untouched, so a loaded state and a continued run stay identical */
+    for(int b=0;b<NBUCKET;b++) freelist[b]=NULL;
+    for(unsigned i=out;i>0;i--){ FreeNode *x=arr[i-1]; unsigned b=(rd32(x->addr-16)/16)%NBUCKET; x->next=freelist[b]; freelist[b]=x; }   /* reverse insert keeps address order inside a bucket */
+    free(arr);
+}
 uint32_t ga_alloc(uint32_t size,int zero){
     uint32_t rs=round_size(size);
     unsigned b=(rs/16)%NBUCKET;
     for(FreeNode **pp=&freelist[b];*pp;pp=&(*pp)->next){
         FreeNode *n=*pp; uint32_t hs=rd32(n->addr-16);
         if(hs==rs){ *pp=n->next; uint32_t a=n->addr; free(n); if(zero) memset(gmem+a,0,rs); return a; }
+    }
+    /* no exact fit: for large requests reuse the smallest free block that is big enough, splitting off the tail when it is worth keeping.
+       Without this a game that frees and re-allocates big buffers at changing sizes only ever grows the bump heap (and the save files). */
+    if(rs>=FIT_MIN){
+        if(coal_gen!=free_gen) coalesce_free();
+        FreeNode **best=NULL; uint32_t bs=0xFFFFFFFFu;
+        for(unsigned bb=0;bb<NBUCKET;bb++) for(FreeNode **pp=&freelist[bb];*pp;pp=&(*pp)->next){
+            uint32_t hs=rd32((*pp)->addr-16);
+            if(hs>=rs&&hs<bs){ bs=hs; best=pp; if(hs==rs) goto fit_found; }
+        }
+        fit_found:
+        if(best){
+            FreeNode *n=*best; *best=n->next; uint32_t a=n->addr; free(n);
+            if(bs-rs>=SPLIT_MIN+16){            /* keep the tail as its own free block */
+                uint32_t ra=a+rs+16, rsz=bs-rs-16;
+                wr32(a-16,rs);
+                wr32(ra-16,rsz); wr32(ra-12,0xA110CA7E);
+                FreeNode *r=malloc(sizeof *r); r->addr=ra; unsigned rb=(rsz/16)%NBUCKET; r->next=freelist[rb]; freelist[rb]=r;
+                bs=rs;
+            }
+            if(zero) memset(gmem+a,0,bs);
+            return a;
+        }
     }
     uint32_t a=heap_top+16;
     if(a+rs>=HEAP_END){ fprintf(stderr,"[OOM] guest heap exhausted (req %u)\n",size); abort(); }
@@ -98,7 +148,7 @@ void ga_free(uint32_t p){
     if(!p) return;
     if(rd32(p-12)!=0xA110CA7E){ fprintf(stderr,"[WARN] free of non-heap ptr %08x\n",p); return; }
     uint32_t rs=rd32(p-16); unsigned b=(rs/16)%NBUCKET;
-    FreeNode *n=malloc(sizeof *n); n->addr=p; n->next=freelist[b]; freelist[b]=n;
+    FreeNode *n=malloc(sizeof *n); n->addr=p; n->next=freelist[b]; freelist[b]=n; free_gen++;
 }
 static uint32_t scratch=0x00200000u;
 uint32_t ga_str(const char *s){ uint32_t a=ga_alloc(strlen(s)+1,0); strcpy((char*)gmem+a,s); return a; }
@@ -531,6 +581,15 @@ void hle_init(void){
 
 /* ---------------- save state ---------------- */
 uint32_t hle_heap_top(void){ return heap_top; }
+/* Payload ranges [lo,hi) of every free heap block, sorted by address (malloc'd array of lo,hi pairs; caller frees). Freed memory is dead data: state.c leaves it out of a save. */
+static int cmp_u32pair(const void *a,const void *b){ uint32_t x=*(const uint32_t*)a, y=*(const uint32_t*)b; return x<y?-1:x>y; }
+uint32_t hle_free_ranges(uint32_t **out){
+    uint32_t n=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *x=freelist[b];x;x=x->next) n++;
+    uint32_t *r=malloc((n?n:1)*2*sizeof *r); if(!r){ *out=NULL; return 0; }
+    uint32_t k=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *x=freelist[b];x;x=x->next){ r[2*k]=x->addr; r[2*k+1]=x->addr+rd32(x->addr-16); k++; }
+    qsort(r,k,2*sizeof *r,cmp_u32pair);
+    *out=r; return k;
+}
 uint64_t hle_free_bytes(void){ uint64_t t=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next) t+=rd32(n->addr-16); return t; }
 uint32_t hle_free_blocks(void){ uint32_t c=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next) c++; return c; }
 uint32_t hle_tab_count(void){ return (uint32_t)ntab; }

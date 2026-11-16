@@ -56,6 +56,23 @@ static int page_is_zero(const uint8_t *p){
     for(unsigned i=0;i<PAGE/8;i++) acc|=q[i];
     return acc==0;
 }
+/* Free heap blocks hold dead data, so a save leaves them out (they come back as zero pages): fr = sorted [lo,hi) pairs from hle_free_ranges.
+   RBO_STATE_KEEPFREE=1 stores them anyway. page_get() returns 0 when the page is all zero once the free ranges are blanked out, otherwise it
+   returns 1 and leaves the page in `out` (blanked). `*fi` is a cursor: pages must be asked for in ascending address order. */
+extern uint32_t hle_free_ranges(uint32_t **out);
+typedef struct { uint32_t *r; uint32_t n, i; } FreeMap;
+static void freemap_init(FreeMap *m){ m->r=NULL; m->n=0; m->i=0; if(!getenv("RBO_STATE_KEEPFREE")) m->n=hle_free_ranges(&m->r); }
+static void freemap_done(FreeMap *m){ free(m->r); m->r=NULL; m->n=0; }
+static int page_get(FreeMap *m,uint32_t a,uint8_t *out){
+    while(m->i<m->n&&m->r[2*m->i+1]<=a) m->i++;
+    if(m->i>=m->n||m->r[2*m->i]>=a+PAGE){ if(page_is_zero(gmem+a)) return 0; memcpy(out,gmem+a,PAGE); return 1; }   /* no free block touches this page */
+    memcpy(out,gmem+a,PAGE);
+    for(uint32_t j=m->i;j<m->n&&m->r[2*j]<a+PAGE;j++){
+        uint32_t lo=m->r[2*j]>a?m->r[2*j]:a, hi=m->r[2*j+1]<a+PAGE?m->r[2*j+1]:a+PAGE;
+        if(hi>lo) memset(out+(lo-a),0,hi-lo);
+    }
+    return !page_is_zero(out);
+}
 /* Guest memory is stored as chunks of up to CHUNK_PAGES pages: [u32 raw_len][u32 comp_len][deflate data] ... [u32 0].
    A raw chunk is a list of [u32 page index][4096 bytes]. Compression (zlib level 1) brings a 320 MB stage down to about a third. */
 #define CHUNK_PAGES 256
@@ -72,14 +89,14 @@ static void mem_state(StateIO *io){
     uint8_t *raw=malloc(CHUNK_RAW), *comp=malloc(compressBound(CHUNK_RAW));
     if(!raw||!comp){ free(raw); free(comp); io->err=ST_ERR_IO; return; }
     if(!io->load){
-        Region rg[3]; int n=regions(rg); uint32_t pages=0, rawlen=0;
+        Region rg[3]; int n=regions(rg); uint32_t pages=0, rawlen=0; FreeMap fm; freemap_init(&fm);
         for(int k=0;k<n&&!io->err;k++) for(uint32_t a=rg[k].lo;a<rg[k].hi&&!io->err;a+=PAGE){
-            if(page_is_zero(gmem+a)) continue;
-            uint32_t pi=a/PAGE; memcpy(raw+rawlen,&pi,4); memcpy(raw+rawlen+4,gmem+a,PAGE); rawlen+=PAGE+4; pages++;
+            uint32_t pi=a/PAGE; if(!page_get(&fm,a,raw+rawlen+4)) continue;
+            memcpy(raw+rawlen,&pi,4); rawlen+=PAGE+4; pages++;
             if(rawlen==CHUNK_RAW){ if(flush_chunk(io,raw,rawlen,comp)) io->err=ST_ERR_IO; rawlen=0; }
         }
         if(!io->err&&flush_chunk(io,raw,rawlen,comp)) io->err=ST_ERR_IO;
-        uint32_t end=0; STX(io,end);
+        uint32_t end=0; STX(io,end); freemap_done(&fm);
         fprintf(stderr,"[state] memory: %u pages (%.1f MB) written\n",pages,pages*(double)PAGE/1048576.0);
     } else {
         /* fresh zero mapping at the same address: releases the old pages without touching all 512 MB */
@@ -164,12 +181,13 @@ void state_service(void){
 
 /* test aid: hash of all guest memory that a state covers + CPU registers (compare a continued run with a loaded one) */
 uint64_t state_mem_hash(void){
-    uint64_t h=1469598103934665603ull; Region rg[3]; int n=regions(rg);
+    uint64_t h=1469598103934665603ull; Region rg[3]; int n=regions(rg); FreeMap fm; freemap_init(&fm); static uint8_t pg[PAGE];
     for(int k=0;k<n;k++) for(uint32_t a=rg[k].lo;a<rg[k].hi;a+=PAGE){
-        if(page_is_zero(gmem+a)) continue;
+        if(!page_get(&fm,a,pg)) continue;
         h^=a; h*=1099511628211ull;
-        const uint64_t *q=(const uint64_t*)(gmem+a); for(unsigned i=0;i<PAGE/8;i++){ h^=q[i]; h*=1099511628211ull; }
+        const uint64_t *q=(const uint64_t*)pg; for(unsigned i=0;i<PAGE/8;i++){ h^=q[i]; h*=1099511628211ull; }
     }
+    freemap_done(&fm);
     for(int i=0;i<8;i++){ h^=cpu.r[i]; h*=1099511628211ull; } h^=cpu.eip; h*=1099511628211ull;
     return h;
 }
