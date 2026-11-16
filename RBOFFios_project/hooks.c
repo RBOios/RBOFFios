@@ -25,13 +25,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #define F_CONV   0x00414d10u   /* conv(surf, src, dx, dy, w, h, pal, mode)                     cdecl */
 #define F_RECT   0x00415060u   /* rect(surf, src, sx, sy, stride, ?, dx, dy, w, h, mode)       cdecl */
 #define F_SCAN   0x00467169u   /* loop head inside 0x467130 (esi=slot table entry, edi=index)        */
 #define F_MM4    0x00412b40u   /* mm4(dst, A, B)  cdecl, 4x4 float matrices                           */
 #define F_MM3    0x00412f00u   /* mm3(dst, A, B)  cdecl                                               */
-#define NH 5                   /* hooks: 0 conv, 1 rect, 2 scan, 3 mm4, 4 mm3 */
+#define F_VX    0x004121c0u   /* xform(count, dst, src)  cdecl: vertex transform loop (hooks_vx.h)  */
+#define F_FTOL  0x0047c4ecu   /* _ftol: st0 -> edx:eax, truncating                                  */
+#define NH 7                   /* hooks: 0 conv, 1 rect, 2 scan, 3 mm4, 4 mm3, 5 vx, 6 ftol */
 #define F_LUT    0x00416f50u   /* build 4 x 256 u16 channel LUTs from a DDSURFACEDESC2 pixel format  */
 #define F_LOCK   0x00416b70u   /* lock(surf, desc) -> lpSurface or 0                                 */
 #define F_UNLOCK 0x00416c00u   /* unlock(surf)                                                       */
@@ -43,6 +46,8 @@ static const Sig sigs[] = {
     { F_SCAN, {0x8b,0x56,0x0c,0x8b,0x04,0xba,0x83,0xf8}, 8 },   /* mov edx,[esi+0xc]; mov eax,[edx+edi*4]; cmp eax,.. */
     { F_MM4,  {0}, 0 },                                          /* verified against the complete function body (hooks_mm.h) */
     { F_MM3,  {0}, 0 },
+    { F_VX,   {0}, 0 },
+    { F_FTOL, {0}, 0 },
 };
 
 static uint8_t saved[NH][8]; static int g_installed[NH];
@@ -189,8 +194,9 @@ void rbo_hookcheck_report(void){ if(g_check) fprintf(stderr,"[hookcheck] FINAL c
 
 /* ---------------- 0x412b40 / 0x412f00: float matrix multiplies ---------------- */
 #include "hooks_mm.h"
-static const uint8_t *const bodies[NH]={0,0,0,mm4_body,mm3_body};
-static const int blen[NH]={0,0,0,(int)sizeof mm4_body,(int)sizeof mm3_body};
+#include "hooks_vx.h"
+static const uint8_t *const bodies[NH]={0,0,0,mm4_body,mm3_body,vx_body,ftol_body};
+static const int blen[NH]={0,0,0,(int)sizeof mm4_body,(int)sizeof mm3_body,(int)sizeof vx_body,(int)sizeof ftol_body};
 static int mm_range_ok(uint32_t p){ return (uint64_t)p+0x40<=MEM_SIZE; }
 /* cdecl (dst, A, B): the original prologue loads eax=A ecx=B edx=dst and leaves them there; the x87 stack is balanced at the ret */
 static void mm_common(int which){
@@ -218,6 +224,47 @@ static void check_wrap_mm(int which){
     if(chk_calls%500==0) fprintf(stderr,"[hookcheck] calls=%llu mismatches=%llu skipped(fallback)=%llu\n",(unsigned long long)chk_calls,(unsigned long long)chk_bad,(unsigned long long)chk_skipped);
     cpu.r[EAX]=A; cpu.r[ECX]=B; cpu.r[EDX]=D; cpu.eip=eip_n; cpu.r[ESP]=esp_n;
 }
+
+/* RBO_HOOKCHECK for vx / ftol: native first, then the original guest code on the same input; everything the game can observe must match */
+static void hook_vx_plain(void);
+static void check_wrap_vx(void){
+    uint32_t sp=cpu.r[ESP]; int32_t n=(int32_t)rd32(sp+4); uint32_t D=rd32(sp+8), S=rd32(sp+12);
+    uint64_t span = n>0 ? (uint64_t)(n-1)*0x20u+12u : 0;
+    if(n<=0||!range_ok(D,span)||span>0x1000000u){ chk_skipped++; hook_vx_plain(); return; }
+    uint8_t *snap=malloc(span), *nat=malloc(span); memcpy(snap,gmem+D,span);
+    uint32_t r0[8]; memcpy(r0,cpu.r,sizeof r0); uint16_t cc0=cpu.fsw_cc;
+    hook_vx_plain();
+    if(cpu.eip==0x4121c5u){ chk_skipped++; free(snap); free(nat); return; }                      /* fell back to the original code by itself */
+    uint32_t eip_n=cpu.eip, esp_n=cpu.r[ESP], eax_n=cpu.r[EAX], ecx_n=cpu.r[ECX], edx_n=cpu.r[EDX], esi_n=cpu.r[ESI]; uint16_t cc_n=cpu.fsw_cc;
+    memcpy(nat,gmem+D,span); memcpy(gmem+D,snap,span);
+    memcpy(gmem+F_VX,saved[5],5); cpu.fsw_cc=cc0;
+    uint32_t args[3]={(uint32_t)n,D,S}; uint32_t esi0=cpu.r[ESI]; uint32_t eax_o=guest_call(F_VX,3,args);
+    memcpy(gmem+F_VX,patch_bytes[5],5);
+    chk_calls++; int bad = memcmp(nat,gmem+D,span)||eax_o!=eax_n||ecx_n!=cpu.r[ECX]||edx_n!=cpu.r[EDX]||esi_n!=cpu.r[ESI]||cc_n!=cpu.fsw_cc||esi0!=cpu.r[ESI];
+    if(bad){ chk_bad++; if(chk_bad<=20) fprintf(stderr,"[hookcheck] MISMATCH vx n=%d dst=%08x src=%08x\n",n,D,S); }
+    if(chk_calls%500==0) fprintf(stderr,"[hookcheck] calls=%llu mismatches=%llu skipped(fallback)=%llu\n",(unsigned long long)chk_calls,(unsigned long long)chk_bad,(unsigned long long)chk_skipped);
+    memcpy(cpu.r,r0,sizeof r0); cpu.r[EAX]=eax_n; cpu.r[ECX]=ecx_n; cpu.r[EDX]=edx_n; cpu.r[ESI]=esi_n; cpu.r[ESP]=esp_n; cpu.eip=eip_n; cpu.fsw_cc=cc_n;
+    free(snap); free(nat);
+}
+static void check_wrap_ftol(void){
+    uint32_t E=cpu.r[ESP]; double v=cpu.st[cpu.top]; int top0=cpu.top; uint32_t ebp0=cpu.r[EBP];
+    ftol_hook();
+    if(cpu.eip==0x47c4f2u){ chk_skipped++; return; }
+    uint32_t eax_n=cpu.r[EAX], edx_n=cpu.r[EDX], eip_n=cpu.eip, esp_n=cpu.r[ESP]; uint16_t fcw_n=cpu.fcw; int top_n=cpu.top;
+    cpu.top=top0; cpu.st[cpu.top]=v; cpu.r[ESP]=E; cpu.r[EBP]=ebp0;
+    memcpy(gmem+F_FTOL,saved[6],5);
+    uint32_t eax_o=guest_call(F_FTOL,0,NULL); uint32_t edx_o=cpu.r[EDX];
+    memcpy(gmem+F_FTOL,patch_bytes[6],5);
+    chk_calls++;
+    if(eax_o!=eax_n||edx_o!=edx_n||fcw_n!=cpu.fcw||top_n!=cpu.top||cpu.r[EBP]!=ebp0){ chk_bad++; if(chk_bad<=20) fprintf(stderr,"[hookcheck] MISMATCH ftol v=%g: %08x:%08x vs %08x:%08x\n",v,edx_n,eax_n,edx_o,eax_o); }
+    cpu.r[EAX]=eax_n; cpu.r[EDX]=edx_n; cpu.eip=eip_n; cpu.r[ESP]=esp_n; cpu.top=top_n; cpu.r[EBP]=ebp0;
+}
+static void hook_vx_plain(void){ uint32_t sp=cpu.r[ESP]; int32_t n=(int32_t)rd32(sp+4); uint32_t D=rd32(sp+8), S=rd32(sp+12);
+    if(!vx_native(n,D,S)){ vx_fallback(); return; }
+    if(n<=0){ cpu.ZF=(n==0); cpu.SF=(n<0); cpu.PF=!__builtin_parity((uint32_t)n&0xff); cpu.CF=0; cpu.OF=0; cpu.AF=0; }
+    cpu.eip=rd32(sp); cpu.r[ESP]=sp+4; }
+static void hook_vx(void){ if(g_check) check_wrap_vx(); else hook_vx_plain(); }
+static void hook_ftol(void){ if(g_check) check_wrap_ftol(); else ftol_hook(); }
 static void hook_mm4(void){ if(g_check) check_wrap_mm(3); else mm_common(3); }
 static void hook_mm3(void){ if(g_check) check_wrap_mm(4); else mm_common(4); }
 
@@ -237,13 +284,15 @@ static void hook_scan(void){
  * (eip-HLE_BASE)>>2 as the index, so the low two bits of EIP are free).  The HLE table therefore keeps its old size and hash,
  * and save states made before mm4/mm3 existed still load. */
 static void hook_mux(void){
-    switch(cpu.eip&3){ case 0: hook_conv(); break; case 1: hook_mm4(); break; default: hook_mm3(); break; }
+    switch(cpu.eip&3){ case 0: hook_conv(); break; case 1: hook_mm4(); break; case 2: hook_mm3(); break; default: hook_vx(); break; }
 }
-static hle_fn fns[NH]={hook_conv,hook_rect,hook_scan,hook_mm4,hook_mm3};
-static int mux_idx=-1;
-static const char *names[NH]={"hook_conv_0x414d10","hook_rect_0x415060","hook_scan_0x467169","hook_mm4_0x412b40","hook_mm3_0x412f00"};
+/* the scan hook's thunk is shared the same way: +0 = scan, +1 = _ftol (so vx and ftol did not add HLE table entries either) */
+static void hook_mux2(void){ if(cpu.eip&3) hook_ftol(); else hook_scan(); }
+static hle_fn fns[NH]={hook_conv,hook_rect,hook_mux2,hook_mm4,hook_mm3,hook_vx,hook_ftol};
+static int mux_idx=-1, mux2_idx=-1;
+static const char *names[NH]={"hook_conv_0x414d10","hook_rect_0x415060","hook_scan_0x467169","hook_mm4_0x412b40","hook_mm3_0x412f00","hook_vx_0x4121c0","hook_ftol_0x47c4ec"};
 
-int rbo_hooks_installed(void){ return g_installed[0]+g_installed[1]+g_installed[2]+g_installed[3]+g_installed[4]; }
+int rbo_hooks_installed(void){ int n=0; for(int i=0;i<NH;i++) n+=g_installed[i]; return n; }
 
 void rbo_uninstall_hooks(void){
     for(int i=0;i<NH;i++) if(g_installed[i]){ memcpy(gmem+sigs[i].addr,saved[i],5); g_installed[i]=0; }
@@ -254,7 +303,8 @@ void rbo_install_hooks_mask(int mask){
         if(g_installed[i] || !(mask&(1<<i))) continue;
         if(bodies[i] ? memcmp(gmem+sigs[i].addr,bodies[i],blen[i]) : memcmp(gmem+sigs[i].addr,sigs[i].sig,sigs[i].len)){ fprintf(stderr,"[hooks] %s: code differs, not installed\n",names[i]); continue; }
         uint32_t at=sigs[i].addr, target;
-        if(i==0||i>=3){ if(mux_idx<0) mux_idx=hle_register("rbo",names[0],-2,hook_mux); target=hle_thunk(mux_idx)+(i==0?0u:(uint32_t)(i-2)); }
+        if(i==0||i==3||i==4||i==5){ if(mux_idx<0) mux_idx=hle_register("rbo",names[0],-2,hook_mux); target=hle_thunk(mux_idx)+(i==0?0u:i==5?3u:(uint32_t)(i-2)); }
+        else if(i==2||i==6){ if(mux2_idx<0) mux2_idx=hle_register("rbo",names[2],-2,hook_mux2); target=hle_thunk(mux2_idx)+(i==2?0u:1u); }
         else target=hle_thunk(hle_register("rbo",names[i],-2,fns[i]));
         memcpy(saved[i],gmem+at,8);
         gmem[at]=0xE9; *(uint32_t*)(gmem+at+1)=target-(at+5); memcpy(patch_bytes[i],gmem+at,5);
@@ -277,5 +327,5 @@ void rbo_install_hooks(void){
     { const char *c=getenv("RBO_HOOKCHECK"); g_check=(c&&*c&&*c!='0'); }
     int mask=(1<<NH)-1; const char *m=getenv("RBO_HOOKMASK"); if(m&&*m) mask=atoi(m);
     rbo_install_hooks_mask(mask);
-    fprintf(stderr,"[hooks] installed: conv=%d rect=%d scan=%d mm4=%d mm3=%d\n",g_installed[0],g_installed[1],g_installed[2],g_installed[3],g_installed[4]);
+    fprintf(stderr,"[hooks] installed: conv=%d rect=%d scan=%d mm4=%d mm3=%d vx=%d ftol=%d\n",g_installed[0],g_installed[1],g_installed[2],g_installed[3],g_installed[4],g_installed[5],g_installed[6]);
 }
