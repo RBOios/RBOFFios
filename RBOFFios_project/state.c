@@ -167,6 +167,7 @@ static int do_load(const char *path,char *why,size_t wn){
     if(io.err){ fprintf(stderr,"[state] load failed (err %d) - state is inconsistent\n",io.err); snprintf(why,wn,"불러오기 실패 (게임을 다시 시작해 주세요)"); return -8; }
     g_retry=0; g_switch=0;
     { extern void rbo_cheat_reset(void); rbo_cheat_reset(); }   /* frozen cheat values belong to the old timeline */
+    { extern void rbo_hooks_resync(void); rbo_hooks_resync(); }   /* a state saved before a hook existed holds the original code: patch it again */
     if(getenv("RBO_STATEDBG")) fprintf(stderr,"[state] LOAD frame=%d eip=%08x icount=%llu memhash=%016llx\n",g_frames,cpu.eip,(unsigned long long)cpu.icount,(unsigned long long)state_mem_hash());
     snprintf(why,wn,"불러왔어요"); return 0;
 }

@@ -233,7 +233,14 @@ static void hook_scan(void){
     }
 }
 
+/* One HLE table entry serves three hooks: the thunk of hook_conv at +0, and +1 / +2 for mm4 / mm3 (the dispatcher uses
+ * (eip-HLE_BASE)>>2 as the index, so the low two bits of EIP are free).  The HLE table therefore keeps its old size and hash,
+ * and save states made before mm4/mm3 existed still load. */
+static void hook_mux(void){
+    switch(cpu.eip&3){ case 0: hook_conv(); break; case 1: hook_mm4(); break; default: hook_mm3(); break; }
+}
 static hle_fn fns[NH]={hook_conv,hook_rect,hook_scan,hook_mm4,hook_mm3};
+static int mux_idx=-1;
 static const char *names[NH]={"hook_conv_0x414d10","hook_rect_0x415060","hook_scan_0x467169","hook_mm4_0x412b40","hook_mm3_0x412f00"};
 
 int rbo_hooks_installed(void){ return g_installed[0]+g_installed[1]+g_installed[2]+g_installed[3]+g_installed[4]; }
@@ -246,11 +253,23 @@ void rbo_install_hooks_mask(int mask){
     for(int i=0;i<NH;i++){
         if(g_installed[i] || !(mask&(1<<i))) continue;
         if(bodies[i] ? memcmp(gmem+sigs[i].addr,bodies[i],blen[i]) : memcmp(gmem+sigs[i].addr,sigs[i].sig,sigs[i].len)){ fprintf(stderr,"[hooks] %s: code differs, not installed\n",names[i]); continue; }
-        int idx=hle_register("rbo",names[i],-2,fns[i]);
-        uint32_t target=hle_thunk(idx), at=sigs[i].addr;
+        uint32_t at=sigs[i].addr, target;
+        if(i==0||i>=3){ if(mux_idx<0) mux_idx=hle_register("rbo",names[0],-2,hook_mux); target=hle_thunk(mux_idx)+(i==0?0u:(uint32_t)(i-2)); }
+        else target=hle_thunk(hle_register("rbo",names[i],-2,fns[i]));
         memcpy(saved[i],gmem+at,8);
         gmem[at]=0xE9; *(uint32_t*)(gmem+at+1)=target-(at+5); memcpy(patch_bytes[i],gmem+at,5);
         g_installed[i]=1;
+    }
+}
+/* After a save state is loaded the guest code is whatever was saved: a state made before a hook existed has the original bytes there.
+ * Re-apply every hook of this process whose function is still pristine (called from state.c after a successful load). */
+void rbo_hooks_resync(void){
+    for(int i=0;i<NH;i++){
+        if(!g_installed[i]) continue;
+        uint32_t at=sigs[i].addr;
+        if(!memcmp(gmem+at,patch_bytes[i],5)) continue;                       /* already patched */
+        int pristine = bodies[i] ? !memcmp(gmem+at,bodies[i],blen[i]) : !memcmp(gmem+at,sigs[i].sig,sigs[i].len);
+        if(pristine) memcpy(gmem+at,patch_bytes[i],5);
     }
 }
 void rbo_install_hooks(void){
