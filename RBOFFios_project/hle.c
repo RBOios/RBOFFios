@@ -362,6 +362,11 @@ static void h_SetUnhandledExceptionFilter(void){ RET(0); }
 static void h_RtlUnwind(void){ fprintf(stderr,"[RtlUnwind] unsupported\n"); abort(); }
 static void h_RaiseException(void){ fprintf(stderr,"[RaiseException] code=%08x\n",A(0)); abort(); }
 static void h_Sleep(void){
+    /* Sleep(0) only gives up the time slice: it is not a wait. The game's main loop calls it after every 30 queued render commands (code@0x413dcf,
+       ~1400 times/s). It used to be handled like a timed wait (first call = "blocked", retried on the next turn), and every such call counted towards
+       the "all threads are blocked" streak in sched_switch, so every ~4th Sleep(0) ended in a 250 us idle sleep although the main thread had work
+       (perf log: idle ~11% of the time at 35-55 fps). Now it is a plain yield: switch to the next thread, no retry, no blocked mark. */
+    if(A(0)==0){ if(sched_nthreads()>1) g_switch=1; RET(0); return; }
     if(sched_nthreads()>1){ /* multi-threaded: yield until the deadline passes */
         int waiting; uint64_t *dl=sched_deadline_ptr(&waiting); uint64_t now=hle_now_us();
         if(!waiting){ sched_set_waiting(1); *dl=now+(uint64_t)A(0)*1000ull; g_retry=1; return; }
