@@ -35,9 +35,11 @@ struct CheatPanel: View {
     ]
     @State private var values: [Int32] = Array(repeating: -1, count: 6)
     @State private var amounts: [Int] = [0, 0, 0, 0, 0, 0]   // 버튼에 표시·적용되는 값 (눌러서 바꿈)
+    @State private var pinTapAt: [Date] = Array(repeating: .distantPast, count: 6)   // 방금 누른 고정 버튼은 에뮬레이터가 처리할 때까지 잠깐 동기화 안 함
+    @State private var pinned: [Bool] = Array(repeating: false, count: 6)   // 고정(핀) 켜짐 여부: 켜면 스테이지가 바뀌어도 값이 유지됨
     private let poll = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
 
-    static let width: CGFloat = 275
+    static let width: CGFloat = 316
     static let height: CGFloat = 36 + 6 * 36 + 14
 
     var body: some View {
@@ -88,10 +90,11 @@ struct CheatPanel: View {
 
     private func row(_ i: Int) -> some View {
         return HStack(spacing: 5) {
+            pinChip(i)
             Text(items[i].name).font(.system(size: 13, weight: .semibold)).foregroundColor(Color.white.opacity(0.85))
-                .frame(width: 46, alignment: .leading)
+                .frame(width: 44, alignment: .leading)
             Text(values[i] < 0 ? "—" : "\(values[i])").font(.system(size: 13, design: .monospaced)).foregroundColor(Color.white.opacity(0.85))
-                .frame(width: 74, alignment: .trailing)
+                .frame(width: 70, alignment: .trailing)
             chip("+ \(amount(i))", on: false, width: 70) {
                 askAmount(i)
             }
@@ -100,6 +103,24 @@ struct CheatPanel: View {
             }
         }
         .frame(height: 32)
+    }
+
+    /// 맨 앞 고정 버튼: 켜면 지금 값을 계속 덮어써서 스테이지 이동·피해·소비로 값이 변하지 않음. 다시 누르면 해제.
+    /// 켠 상태에서 적용을 누르면 고정값도 그 값으로 바뀜.
+    private func pinChip(_ i: Int) -> some View {
+        let on = pinned[i]
+        return Button(action: {
+            let next = !pinned[i]
+            pinned[i] = next
+            pinTapAt[i] = Date()
+            rbo_cheat_freeze(Int32(i), next ? 1 : 0)
+        }) {
+            Text("고정").font(.system(size: 11, weight: .bold)).lineLimit(1).minimumScaleFactor(0.6)
+                .foregroundColor(on ? Color.yellow : Color.white.opacity(0.9))
+                .frame(width: 38, height: 28)
+                .background(on ? Color.yellow.opacity(0.20) : Color.white.opacity(0.14))
+                .clipShape(Capsule())
+        }
     }
 
     private func chip(_ title: String, on: Bool, width: CGFloat, _ action: @escaping () -> Void) -> some View {
@@ -114,5 +135,11 @@ struct CheatPanel: View {
 
     private func refresh() {
         for i in 0..<6 { values[i] = Int32(rbo_cheat_get(Int32(i))) }
+        // 불러오기/새 게임 등으로 에뮬레이터가 고정을 풀었으면 버튼 표시도 같이 맞춤
+        let mask = Int(rbo_cheat_frozen_mask())
+        for i in 0..<6 {
+            let f = (mask >> i) & 1 == 1
+            if pinned[i] != f && Date().timeIntervalSince(pinTapAt[i]) > 1.5 { pinned[i] = f }
+        }
     }
 }
