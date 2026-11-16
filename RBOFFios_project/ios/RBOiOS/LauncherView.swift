@@ -52,7 +52,7 @@ struct LauncherView: View {
                 .pickerStyle(.menu).accentColor(.cyan)
             }
             Button("게임 폴더 선택…") { ClickSound.play(); showPicker = true }.foregroundColor(.cyan)
-            Text(folderName.isEmpty ? "게임 폴더가 선택되지 않았어요 (RBO.exe와 DATA 폴더가 있는 곳)" : "폴더: \(folderName)")
+            Text(folderName.isEmpty ? "게임 폴더가 선택되지 않았어요 (RBO_Ex3.exe와 DATA 폴더가 있는 곳)" : "폴더: \(folderName)")
                 .font(.footnote).foregroundColor(.gray)
             if !message.isEmpty { Text(message).font(.footnote).foregroundColor(.orange) }
         }
