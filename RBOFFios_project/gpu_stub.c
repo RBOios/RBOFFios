@@ -15,6 +15,7 @@ int gpu_init(void){ return 1; }
 const char *gpu_error(void){ return ""; }
 int gpu_failed(void){ return 0; }
 void gpu_stats(unsigned long *s,double *w,unsigned long *v,unsigned long *r){ if(s)*s=n_sync; if(w)*w=0; if(v)*v=n_vert; if(r)*r=n_run; }
+double gpu_busy_ms(void){ return 0; }
 void gpu_submit(void){}
 void gpu_sync(void){ n_sync++; }
 void gpu_rt_set(int w,int h){ if(rt&&rtw==w&&rth==h) return; free(rt); rt=calloc((size_t)w*h,4); rtw=w; rth=h; }

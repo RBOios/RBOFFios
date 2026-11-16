@@ -595,12 +595,12 @@ static int gpu_clear_rect(Surf *rt,int l,int t,int r,int b,uint32_t color){
     return 1;
 }
 int d3d_gpu_report(char *out,int n){
-    static unsigned long l_gd=0,l_cd=0,l_tr=0,l_sy=0,l_vx=0; static double l_wt=0;
-    unsigned long sy=0,vx=0,ru=0; double wt=0; if(gpu_mode>0&&!gpu_dead) gpu_stats(&sy,&wt,&vx,&ru);
-    int len=snprintf(out,n,"[GPU] %s | draws gpu %lu cpu %lu | uploads %lu | waits %lu (%.1f ms) verts %lu | frames gpu %lu cpu %lu penalty %lu%s%s\n",
-        gpu_dead?"failed":(gpu_mode==0?"off":(gpu_mode==2?"forced":"auto")),st_gdraws-l_gd,st_cdraws-l_cd,st_trips-l_tr,sy-l_sy,wt-l_wt,vx-l_vx,st_fgpu,st_fcpu,st_penalty,
+    static unsigned long l_gd=0,l_cd=0,l_tr=0,l_sy=0,l_vx=0; static double l_wt=0, l_bz=0;
+    unsigned long sy=0,vx=0,ru=0; double wt=0, bz=0; if(gpu_mode>0&&!gpu_dead){ gpu_stats(&sy,&wt,&vx,&ru); bz=gpu_busy_ms(); }
+    int len=snprintf(out,n,"[GPU] %s | draws gpu %lu cpu %lu | uploads %lu | waits %lu (%.1f ms) gpu busy %.1f ms verts %lu | frames gpu %lu cpu %lu penalty %lu%s%s\n",
+        gpu_dead?"failed":(gpu_mode==0?"off":(gpu_mode==2?"forced":"auto")),st_gdraws-l_gd,st_cdraws-l_cd,st_trips-l_tr,sy-l_sy,wt-l_wt,bz-l_bz,vx-l_vx,st_fgpu,st_fcpu,st_penalty,
         (gpu_error()[0]?" | ":""),gpu_error());
-    l_gd=st_gdraws; l_cd=st_cdraws; l_tr=st_trips; l_sy=sy; l_wt=wt; l_vx=vx;
+    l_gd=st_gdraws; l_cd=st_cdraws; l_tr=st_trips; l_sy=sy; l_wt=wt; l_bz=bz; l_vx=vx;
     return len<0?0:(len<n?len:n-1);
 }
 #else

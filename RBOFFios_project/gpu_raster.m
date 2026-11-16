@@ -132,6 +132,7 @@ static int      g_run_start = 0, g_run_n = 0;
 static GpuState g_state; static int g_have_state = 0;
 
 static unsigned long g_n_sync = 0, g_n_verts = 0, g_n_runs = 0; static double g_wait_ms = 0;
+static unsigned long g_busy_us = 0;                                 /* GPU execution time of all finished command buffers (completion handler thread adds, atomically) */
 
 static void set_err(const char *what, NSError *e) {
     const char *d = e ? [[e localizedDescription] UTF8String] : "";
@@ -142,6 +143,7 @@ static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 
 const char *gpu_error(void) { return g_err; }
 int gpu_failed(void) { return g_dead; }
+double gpu_busy_ms(void) { return (double)__atomic_load_n(&g_busy_us, __ATOMIC_RELAXED) / 1000.0; }
 void gpu_stats(unsigned long *syncs, double *wait_ms, unsigned long *verts, unsigned long *runs) {
     if (syncs) *syncs = g_n_sync; if (wait_ms) *wait_ms = g_wait_ms; if (verts) *verts = g_n_verts; if (runs) *runs = g_n_runs;
 }
@@ -242,6 +244,18 @@ static void flush_run(void) {
     g_run_n = 0;
 }
 
+/* Wait for a committed command buffer.  waitUntilCompleted sleeps the thread, and waking it up again costs a few hundred microseconds on iOS - paid once per
+   frame, on the path of the emulator thread.  The GPU job of a frame is short, so poll the status for up to 3 ms first and only then go back to sleeping. */
+static void wait_cb(id<MTLCommandBuffer> cb) {
+    double t0 = now_ms();
+    for (int i = 1;; i++) {
+        MTLCommandBufferStatus s = cb.status;
+        if (s == MTLCommandBufferStatusCompleted || s == MTLCommandBufferStatusError) return;
+        if ((i & 31) == 0 && now_ms() - t0 > 3.0) break;
+    }
+    [cb waitUntilCompleted];
+}
+
 /* Submit everything recorded so far WITHOUT waiting. The render target stays on the GPU; later passes load it again. */
 void gpu_submit(void) {
     if (!g_enc && !g_cb) { g_vtx_used = 0; g_have_state = 0; return; }
@@ -252,6 +266,7 @@ void gpu_submit(void) {
             unsigned ep = g_epoch;
             [g_cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
                 if (cb.status == MTLCommandBufferStatusError) g_dead = 1;
+                { double d = cb.GPUEndTime - cb.GPUStartTime; if (d > 0 && d < 1.0) __atomic_fetch_add(&g_busy_us, (unsigned long)(d * 1e6), __ATOMIC_RELAXED); }
                 unsigned cur = __atomic_load_n(&g_done_epoch, __ATOMIC_ACQUIRE);
                 while (ep > cur && !__atomic_compare_exchange_n(&g_done_epoch, &cur, ep, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
             }];
@@ -271,7 +286,7 @@ void gpu_sync(void) {
     @autoreleasepool {
         double t0 = now_ms();
         id<MTLCommandBuffer> cb = g_last_cb; g_last_cb = nil;
-        [cb waitUntilCompleted];
+        wait_cb(cb);
         if (cb.status == MTLCommandBufferStatusError) { set_err("command buffer", cb.error); g_dead = 1; }
         unsigned all = g_epoch - 1, cur = __atomic_load_n(&g_done_epoch, __ATOMIC_ACQUIRE);
         while (all > cur && !__atomic_compare_exchange_n(&g_done_epoch, &cur, all, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
@@ -283,7 +298,7 @@ static void begin_pass(void) {
     if (g_enc) return;
     if (g_vb_cb[g_vbi]) {                                           /* this vertex buffer was read by an earlier submission: make sure it is done */
         if (g_vb_cb[g_vbi].status != MTLCommandBufferStatusCompleted && g_vb_cb[g_vbi].status != MTLCommandBufferStatusError) {
-            double t0 = now_ms(); [g_vb_cb[g_vbi] waitUntilCompleted]; g_wait_ms += now_ms() - t0; g_n_sync++;
+            double t0 = now_ms(); wait_cb(g_vb_cb[g_vbi]); g_wait_ms += now_ms() - t0; g_n_sync++;
         }
         g_vb_cb[g_vbi] = nil;
     }

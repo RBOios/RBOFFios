@@ -40,6 +40,7 @@ void gpu_sync(void);                                  /* submit everything recor
 
 /* counters since start: syncs, total wait ms, triangles' vertices, state changes */
 void gpu_stats(unsigned long *syncs,double *wait_ms,unsigned long *verts,unsigned long *runs);
+double gpu_busy_ms(void);                             /* total time the GPU spent executing our command buffers (perf log: "gpu busy") */
 
 #ifdef __cplusplus
 }
