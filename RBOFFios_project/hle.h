@@ -9,6 +9,7 @@ extern int g_cur_idx;
 extern const char *g_root;       /* host dir containing DATA/ */
 extern int g_max_frames;
 extern int g_frames;
+void rbo_event(const char *fmt,...);   /* one-line event for rbo_perf.txt (pause / cheat / state save+load); thread-safe */
 extern int g_fast;
 void hle_vsync_advance(void);
 void hle_sleep_us(uint64_t us,int src);   /* usleep that is added to the idle-time counters; src: 0=Sleep 1=idle tick 2=vblank */

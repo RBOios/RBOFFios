@@ -41,6 +41,8 @@ void rbo_get_stats2(int *frames, double *present_ms_total, double *idle_ms_total
  * one per line. Call once per interval (it keeps its own snapshot). UTF-8, returns length. */
 int  rbo_get_prof(char *out, int n);
 int  rbo_audio_pull(int16_t *stereo, int frames);
+/* Events (pause on/off, cheat requests, state save/load start+end) since the last call, one per line ("frame=N 일시정지 켬"). Drains the queue. UTF-8, returns length. */
+int  rbo_get_events(char *out, int n);
 /* Quick save / load (one file per slot). The request is carried out asynchronously by the emulator thread: poll rbo_state_result().
  * op: 1 = save, 2 = load. Returns 0 if accepted, <0 if busy / bad op. */
 int  rbo_state_request(int op, const char *path);

@@ -75,7 +75,28 @@ int rbo_start(const char *root,const char *exe,const RboCallbacks *cb){
     if(pthread_create(&th,&at,thread_main,NULL)!=0){ running=0; return -2; }
     return 0;
 }
-void rbo_set_paused(int p){ g_paused=p?1:0; }
+#include <stdarg.h>
+#define EV_MAX 64
+static struct { int frame; char text[112]; } ev_q[EV_MAX]; static unsigned ev_h=0, ev_t=0; static pthread_mutex_t ev_mu=PTHREAD_MUTEX_INITIALIZER;
+void rbo_event(const char *fmt,...){
+    char buf[112]; va_list ap; va_start(ap,fmt); vsnprintf(buf,sizeof buf,fmt,ap); va_end(ap);
+    pthread_mutex_lock(&ev_mu);
+    if(ev_h-ev_t>=EV_MAX) ev_t++;                              /* full: drop the oldest */
+    ev_q[ev_h%EV_MAX].frame=g_frames; memcpy(ev_q[ev_h%EV_MAX].text,buf,sizeof buf); ev_h++;
+    pthread_mutex_unlock(&ev_mu);
+}
+int rbo_get_events(char *out,int n){
+    int len=0; if(n<1) return 0; out[0]=0;
+    pthread_mutex_lock(&ev_mu);
+    while(ev_t!=ev_h){
+        int w=snprintf(out+len,(size_t)(n-len),"%sframe=%d %s",len?"\n":"",ev_q[ev_t%EV_MAX].frame,ev_q[ev_t%EV_MAX].text);
+        if(w<0||len+w>=n-1) break;                             /* no room: keep the rest for the next call */
+        len+=w; ev_t++;
+    }
+    pthread_mutex_unlock(&ev_mu);
+    return len;
+}
+void rbo_set_paused(int p){ p=p?1:0; if(p!=g_paused) rbo_event("일시정지 %s",p?"켬":"끔"); g_paused=p; }
 extern volatile float g_vol_master, g_vol_bgm;
 void rbo_set_volume(float master,float bgm){ if(master<0)master=0; if(master>1)master=1; if(bgm<0)bgm=0; if(bgm>1)bgm=1; g_vol_master=master; g_vol_bgm=bgm; }
 void rbo_stop(void){ g_stop_req=1; }

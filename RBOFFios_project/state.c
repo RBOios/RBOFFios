@@ -175,9 +175,12 @@ static int do_load(const char *path,char *why,size_t wn){
 /* called from cpu_run on the emulator thread */
 void state_service(void){
     int req=__atomic_exchange_n(&g_state_req,0,__ATOMIC_ACQ_REL); if(!req) return;
-    char why[160]; int r;
+    char why[160]; int r; struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
+    rbo_event("상태 %s 시작 (에뮬레이터 정지)",req==1?"저장":"불러오기");
     if(req==1){ r=do_save(g_state_path,why,sizeof why); result(r==0?2:r,why); }
     else      { r=do_load(g_state_path,why,sizeof why); result(r==0?3:r,why); }
+    clock_gettime(CLOCK_MONOTONIC,&t1);
+    rbo_event("상태 %s %s (%.0f ms 걸림)",req==1?"저장":"불러오기",r==0?"완료":"실패",(t1.tv_sec-t0.tv_sec)*1e3+(t1.tv_nsec-t0.tv_nsec)/1e6);
 }
 
 /* test aid: hash of all guest memory that a state covers + CPU registers (compare a continued run with a loaded one) */
@@ -206,6 +209,7 @@ int rbo_state_request(int op,const char *path){
     if(__atomic_load_n(&g_state_res,__ATOMIC_ACQUIRE)==1||g_state_req) return -2;     /* busy */
     snprintf(g_state_path,sizeof g_state_path,"%s",path);
     result(1,"");
+    rbo_event("상태 %s 요청",op==1?"저장":"불러오기");
     __atomic_store_n(&g_state_req,op,__ATOMIC_RELEASE);
     return 0;
 }

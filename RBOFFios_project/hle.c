@@ -210,6 +210,8 @@ static void cheat_push(int op,int id,int val){
     if(id<0||id>=6||!cheat_ok()) return;
     unsigned h=cq_h; if(h-cq_t>=32) return;               /* queue full: drop (the UI cannot produce requests that fast) */
     cq[h%32]=(CheatReq){op,id,val}; __atomic_store_n(&cq_h,h+1,__ATOMIC_RELEASE); g_cheat_flag=1;
+    { static const char *nm[6]={"HP","SP","스킬포인트","스탯포인트","화살","돈"}; static const char *opn[5]={"","설정","증감","고정","고정 해제"};
+      if(op==1||op==2) rbo_event("치트 %s %s %d",nm[id],opn[op],val); else rbo_event("치트 %s %s",nm[id],opn[op]); }
 }
 void rbo_cheat_set(int id,int value){ cheat_push(1,id,value); }
 void rbo_cheat_add(int id,int delta){ cheat_push(2,id,delta); }

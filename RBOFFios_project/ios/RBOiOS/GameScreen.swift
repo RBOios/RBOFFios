@@ -109,7 +109,7 @@ struct GameScreen: View {
             if finished {
                 VStack(spacing: 12) {
                     Text("게임이 종료되었어요").foregroundColor(.white)
-                    Text("에디션을 바꾸려면 앱을 다시 실행해 주세요 (엔진 상태가 전역이라 한 번만 시작할 수 있어요).").font(.footnote).foregroundColor(.gray)
+                    Text("다시 시작하려면 앱을 다시 실행해 주세요 (엔진 상태가 전역이라 한 번만 시작할 수 있어요).").font(.footnote).foregroundColor(.gray)
                     Button("앱 종료") { exit(0) }.foregroundColor(.cyan)
                 }.padding(24).background(Color.black.opacity(0.85)).cornerRadius(12)
             }
@@ -132,6 +132,13 @@ struct GameScreen: View {
                               Int32(Date().timeIntervalSince(logStart)), f, df, df > 0 ? dms / Double(df) : 0,
                               Double(dins) / 1_000_000.0, thermal, lowPower)
             logLine(head + fullProf.replacingOccurrences(of: "\n", with: " | "))
+            // 일시정지 / 치트 / 상태 저장·불러오기가 일어난 시점을 한 줄씩 따로 남김 (t = 이 줄이 기록된 시각, frame = 게임 프레임 번호)
+            var ebuf = [CChar](repeating: 0, count: 2048)
+            if rbo_get_events(&ebuf, Int32(ebuf.count)) > 0 {
+                for line in String(cString: ebuf).split(separator: "\n") {
+                    logLine(String(format: "t=%d [이벤트] ", Int32(Date().timeIntervalSince(logStart))) + line)
+                }
+            }
             statsText = String(format: "%d FPS · 화면변환 %.1fms · 대기 %.0f%% · %.0f MIPS", df, df > 0 ? dms / Double(df) : 0, didle / 10.0, Double(dins) / 1_000_000.0)
         }
         .onAppear {
