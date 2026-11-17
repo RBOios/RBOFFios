@@ -72,7 +72,7 @@ enum L10n {
         // touch pad
         "특수": "Special",
         "방어": "Guard",
-        "강 공격": "Heavy",
-        "약 공격": "Light",
+        "강 공격": "Strong\nAttack",   // 버튼 안에서 두 줄로 표시
+        "약 공격": "Weak\nAttack",
     ]
 }

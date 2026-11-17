@@ -273,11 +273,14 @@ struct PadButton: View {
                     Capsule().fill(Color.white.opacity(lit ? 0.30 : 0.08))
                     Capsule().stroke(Color.white.opacity(lit ? 0.80 : 0.32), lineWidth: lit ? 3 : 1.5)
                         .shadow(color: Color.white.opacity(lit ? 0.70 : 0), radius: lit ? 8 : 0)   // lights up when pressed, like the D-pad
+                    // 두 줄짜리 이름(영어 Weak/Strong Attack)은 원 위·아래쪽으로 갈수록 폭이 좁아져서 글자가 삐져나옴 -> 글자를 줄이고 폭을 원 안쪽으로 제한
+                    let twoLine = label.contains("\n")
                     Text(label)
-                        .font(.system(size: m * fontScale, weight: .bold))
-                        .lineLimit(1)
+                        .font(.system(size: m * fontScale * 0.80, weight: .bold))
+                        .lineLimit(twoLine ? 2 : 1)
+                        .multilineTextAlignment(.center)
                         .minimumScaleFactor(0.5)
-                        .padding(.horizontal, m * 0.08)
+                        .frame(width: m * (twoLine ? 0.80 : 0.84))
                         .foregroundColor(Color.white.opacity(lit ? 0.80 : 0.32))   // same as the D-pad (idle 0.32, pressed 0.80)
                 }
                 .frame(width: m, height: m)

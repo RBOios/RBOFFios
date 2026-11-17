@@ -10,6 +10,7 @@ struct LauncherView: View {
     @AppStorage("screenSize") private var screenSizeRaw: Int = ScreenSize.s640.rawValue
     @AppStorage(AppLang.key) private var langRaw: String = ""    // "" = not chosen yet (AppLang.defaultLang is used); changing it redraws this view
     private var screenSize: ScreenSize { ScreenSize(rawValue: screenSizeRaw) ?? .s640 }
+    private let panelContentWidth: CGFloat = 240   // 카드 안쪽 최소 폭. 영어 화면 기준 폭이라 한국어도 같은 크기로 보임 (카드 전체 = 240 + 좌우 패딩 24x2)
     private var lang: AppLang { AppLang(rawValue: langRaw) ?? AppLang.defaultLang }   // langRaw를 body에서 읽어야 SwiftUI가 언어가 바뀔 때 화면을 다시 그림
 
     var body: some View {
@@ -51,12 +52,16 @@ struct LauncherView: View {
                 Picker(tr("화면 크기"), selection: $screenSizeRaw) {
                     ForEach(ScreenSize.allCases) { Text($0.title).tag($0.rawValue) }
                 }
-                .pickerStyle(.menu).accentColor(.cyan)
+                .pickerStyle(.menu).accentColor(.cyan).lineLimit(1).fixedSize()   // "640x480"이 두 줄로 꺾이지 않게
             }
             Button(tr("게임 폴더 선택…")) { ClickSound.play(); showPicker = true }.foregroundColor(.cyan)
             Text(folderName.isEmpty ? tr("게임 폴더가 선택되지 않았어요 (RBO_Ex3.exe와 DATA 폴더가 있는 곳)") : trf("폴더: %@", folderName))
                 .font(.footnote).foregroundColor(.gray)
-            if !message.isEmpty { Text(message).font(.footnote).foregroundColor(.orange) }
+                .frame(maxWidth: panelContentWidth, alignment: .leading).fixedSize(horizontal: false, vertical: true)   // 긴 안내문은 카드를 늘리지 않고 줄바꿈
+            if !message.isEmpty {
+                Text(message).font(.footnote).foregroundColor(.orange)
+                    .frame(maxWidth: panelContentWidth, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: 10) {                                   // language switch: 한국어 | English
                 Text("🌐").font(.system(size: 14))
                 ForEach(AppLang.allCases) { l in
@@ -68,6 +73,7 @@ struct LauncherView: View {
                 }
             }
         }
+        .frame(minWidth: panelContentWidth, alignment: .leading)   // 언어가 바뀌어도 카드 폭이 줄지 않게 (영어 기준 폭)
         .fixedSize(horizontal: true, vertical: false)   // panel hugs its content (Divider would otherwise stretch it full width)
         .padding(24)
         .background(Color.black.opacity(0.6))
