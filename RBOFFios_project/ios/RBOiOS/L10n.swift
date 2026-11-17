@@ -1,15 +1,15 @@
 import SwiftUI
 
-/// App UI language: Korean or English. The first launch follows the iPhone/iPad language (Korean -> Korean, anything else -> English);
-/// the launcher has a 한국어 | English switch that overrides it and is remembered.
+/// App UI language: Korean or English. The device language is NOT used: until the person taps the launcher's 한국어 | English switch,
+/// the app uses `defaultLang`; the tapped choice is remembered for the next launches.
 /// (The game's own text comes from the original Korean game files and is not affected.)
 enum AppLang: String, CaseIterable, Identifiable {
     case ko, en
     var id: String { rawValue }
     var label: String { self == .ko ? "한국어" : "English" }
     static let key = "rboLang"
-    static var systemDefault: AppLang { (Locale.preferredLanguages.first ?? "en").hasPrefix("ko") ? .ko : .en }
-    static var current: AppLang { AppLang(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? systemDefault }
+    static let defaultLang: AppLang = .ko    // 처음 설치했을 때의 언어 (기기 언어와 상관없음). 영어로 시작하려면 .en
+    static var current: AppLang { AppLang(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? defaultLang }
 }
 
 /// tr("한국어 문구") -> the text in the current language. The Korean text is the key; English lives in L10n.en.

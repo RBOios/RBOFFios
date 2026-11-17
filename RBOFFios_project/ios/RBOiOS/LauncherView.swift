@@ -8,7 +8,7 @@ struct LauncherView: View {
     @State private var gameURL: URL? = nil
     @State private var message: String = ""
     @AppStorage("screenSize") private var screenSizeRaw: Int = ScreenSize.s640.rawValue
-    @AppStorage(AppLang.key) private var langRaw: String = ""    // "" = follow the device language; changing it redraws this view
+    @AppStorage(AppLang.key) private var langRaw: String = ""    // "" = not chosen yet (AppLang.defaultLang is used); changing it redraws this view
     private var screenSize: ScreenSize { ScreenSize(rawValue: screenSizeRaw) ?? .s640 }
 
     var body: some View {
