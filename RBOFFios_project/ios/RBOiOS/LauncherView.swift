@@ -10,6 +10,7 @@ struct LauncherView: View {
     @AppStorage("screenSize") private var screenSizeRaw: Int = ScreenSize.s640.rawValue
     @AppStorage(AppLang.key) private var langRaw: String = ""    // "" = not chosen yet (AppLang.defaultLang is used); changing it redraws this view
     private var screenSize: ScreenSize { ScreenSize(rawValue: screenSizeRaw) ?? .s640 }
+    private var lang: AppLang { AppLang(rawValue: langRaw) ?? AppLang.defaultLang }   // langRaw를 body에서 읽어야 SwiftUI가 언어가 바뀔 때 화면을 다시 그림
 
     var body: some View {
         ZStack {
@@ -26,7 +27,7 @@ struct LauncherView: View {
             if let ed = running, let url = gameURL {
                 GameScreen(edition: ed, root: url, screenSize: screenSize)
             } else {
-                menu
+                menu.id(langRaw)    // 언어가 바뀌면 메뉴를 새로 만들어서 모든 글자가 새 언어로 바뀌게 함
             }
         }
         .fileImporter(isPresented: $showPicker, allowedContentTypes: [.folder]) { result in
@@ -60,8 +61,8 @@ struct LauncherView: View {
                 Text("🌐").font(.system(size: 14))
                 ForEach(AppLang.allCases) { l in
                     Button(action: { ClickSound.play(); langRaw = l.rawValue; message = "" }) {
-                        Text(l.label).font(.system(size: 14, weight: AppLang.current == l ? .bold : .regular))
-                            .foregroundColor(AppLang.current == l ? .white : .gray)
+                        Text(l.label).font(.system(size: 14, weight: lang == l ? .bold : .regular))
+                            .foregroundColor(lang == l ? .white : .gray)
                     }
                     if l != AppLang.allCases.last { Text("|").font(.system(size: 14)).foregroundColor(.gray) }
                 }
