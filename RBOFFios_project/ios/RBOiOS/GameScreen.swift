@@ -108,9 +108,9 @@ struct GameScreen: View {
             }
             if finished {
                 VStack(spacing: 12) {
-                    Text("게임이 종료되었어요").foregroundColor(.white)
-                    Text("다시 시작하려면 앱을 다시 실행해 주세요 (엔진 상태가 전역이라 한 번만 시작할 수 있어요).").font(.footnote).foregroundColor(.gray)
-                    Button("앱 종료") { exit(0) }.foregroundColor(.cyan)
+                    Text(tr("게임이 종료되었어요")).foregroundColor(.white)
+                    Text(tr("다시 시작하려면 앱을 다시 실행해 주세요 (엔진 상태가 전역이라 한 번만 시작할 수 있어요).")).font(.footnote).foregroundColor(.gray)
+                    Button(tr("앱 종료")) { exit(0) }.foregroundColor(.cyan)
                 }.padding(24).background(Color.black.opacity(0.85)).cornerRadius(12)
             }
         }

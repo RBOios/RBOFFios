@@ -8,6 +8,7 @@ struct QuickStateBar: View {
     @State private var working = false
     @State private var askLoad = false
     @State private var loadInfo = ""
+    @State private var lastOp: Int32 = 0          // 1 = save, 2 = load: tells which table the result code belongs to
     private let poll = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
 
     private static var fileURL: URL {
@@ -27,9 +28,9 @@ struct QuickStateBar: View {
                     .allowsHitTesting(false)
             }
         }
-        .alert("저장한 게임을 불러올까요?", isPresented: $askLoad) {
-            Button("취소", role: .cancel) {}
-            Button("불러오기", role: .destructive) { start(2) }
+        .alert(tr("저장한 게임을 불러올까요?"), isPresented: $askLoad) {
+            Button(tr("취소"), role: .cancel) {}
+            Button(tr("불러오기"), role: .destructive) { start(2) }
         } message: {
             Text(loadInfo)
         }
@@ -67,15 +68,17 @@ struct QuickStateBar: View {
     }
 
     private func start(_ op: Int32) {
-        if rbo_state_request(op, Self.fileURL.path) == 0 { working = true; message = op == 1 ? "저장 중…" : "불러오는 중…" }
-        else { show("잠시 후 다시 시도해 주세요") }
+        if rbo_state_request(op, Self.fileURL.path) == 0 { working = true; lastOp = op; message = op == 1 ? tr("저장 중…") : tr("불러오는 중…") }
+        else { show(tr("잠시 후 다시 시도해 주세요")) }
     }
 
     private func prepareLoad() {
         var t: Int64 = 0; var f: Int32 = 0
-        guard rbo_state_info(Self.fileURL.path, &t, &f) == 0 else { show("저장된 게임이 없어요"); return }
-        let fmt = DateFormatter(); fmt.locale = Locale(identifier: "ko_KR"); fmt.dateFormat = "M월 d일 a h:mm"
-        loadInfo = "\(fmt.string(from: Date(timeIntervalSince1970: TimeInterval(t))))에 저장한 상태예요.\n지금 진행 중인 내용은 사라져요."
+        guard rbo_state_info(Self.fileURL.path, &t, &f) == 0 else { show(tr("저장된 게임이 없어요")); return }
+        let fmt = DateFormatter()
+        if AppLang.current == .ko { fmt.locale = Locale(identifier: "ko_KR"); fmt.dateFormat = "M월 d일 a h:mm" }
+        else { fmt.locale = Locale(identifier: "en_US"); fmt.dateFormat = "MMM d, h:mm a" }
+        loadInfo = trf("%@에 저장한 상태예요.\n지금 진행 중인 내용은 사라져요.", fmt.string(from: Date(timeIntervalSince1970: TimeInterval(t))))
         askLoad = true
     }
 
@@ -84,6 +87,16 @@ struct QuickStateBar: View {
         let r = rbo_state_result()
         if r == 1 { return }
         working = false
-        show(String(cString: rbo_state_message()))
+        show(Self.resultText(op: lastOp, code: r))
+    }
+
+    /// Localized text for the engine's result code (the engine itself only has Korean text, used here as a fallback).
+    private static func resultText(op: Int32, code: Int32) -> String {
+        let save: [Int32: String] = [2: "저장했어요", -1: "지금은 저장할 수 없어요", -2: "영상 재생 중에는 저장할 수 없어요", -3: "파일을 만들 수 없어요",
+                                     -4: "저장 중 오류 (저장 공간이 부족할 수 있어요)", -5: "저장 파일을 바꿀 수 없어요"]
+        let load: [Int32: String] = [3: "불러왔어요", -1: "지금은 불러올 수 없어요", -2: "저장된 게임이 없어요", -3: "저장 파일 형식이 맞지 않아요", -4: "저장 파일이 손상되었어요",
+                                     -5: "다른 실행 파일의 저장이에요", -6: "이 버전과 호환되지 않는 저장이에요", -7: "파일을 열 수 없어요", -8: "불러오기 실패 (게임을 다시 시작해 주세요)"]
+        if let ko = (op == 1 ? save : load)[code] { return tr(ko) }
+        return String(cString: rbo_state_message())
     }
 }

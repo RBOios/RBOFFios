@@ -5,7 +5,7 @@ enum Edition: String, CaseIterable, Identifiable {
     case ex3
     var id: String { rawValue }
     static let available: [Edition] = [.ex3]
-    var title: String { "확장팩 3" }
+    var title: String { tr("확장팩 3") }
     var exeName: String { "RBO_Ex3.exe" }
 }
 
@@ -33,7 +33,7 @@ enum ScreenSize: Int, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .s640: return "640x480"
-        case .psp: return "가상 PSP"
+        case .psp: return tr("가상 PSP")
         case .s800: return "800x600"
         case .s1024: return "1024x768"
         }

@@ -8,6 +8,7 @@ struct LauncherView: View {
     @State private var gameURL: URL? = nil
     @State private var message: String = ""
     @AppStorage("screenSize") private var screenSizeRaw: Int = ScreenSize.s640.rawValue
+    @AppStorage(AppLang.key) private var langRaw: String = ""    // "" = follow the device language; changing it redraws this view
     private var screenSize: ScreenSize { ScreenSize(rawValue: screenSizeRaw) ?? .s640 }
 
     var body: some View {
@@ -39,22 +40,32 @@ struct LauncherView: View {
         VStack(alignment: .leading, spacing: 18) {
             ForEach(Edition.available) { ed in
                 Button(action: { ClickSound.play(); launch(ed) }) {
-                    HStack { Text("\(ed.title) 시작하기").font(.system(size: 26, weight: .bold)); Text("▶").font(.system(size: 22)) }
+                    HStack { Text(trf("%@ 시작하기", ed.title)).font(.system(size: 26, weight: .bold)); Text("▶").font(.system(size: 22)) }
                         .foregroundColor(.white)
                 }
             }
             Divider().background(Color.gray)
             HStack {
-                Text("화면 크기").foregroundColor(.white)
-                Picker("화면 크기", selection: $screenSizeRaw) {
+                Text(tr("화면 크기")).foregroundColor(.white)
+                Picker(tr("화면 크기"), selection: $screenSizeRaw) {
                     ForEach(ScreenSize.allCases) { Text($0.title).tag($0.rawValue) }
                 }
                 .pickerStyle(.menu).accentColor(.cyan)
             }
-            Button("게임 폴더 선택…") { ClickSound.play(); showPicker = true }.foregroundColor(.cyan)
-            Text(folderName.isEmpty ? "게임 폴더가 선택되지 않았어요 (RBO_Ex3.exe와 DATA 폴더가 있는 곳)" : "폴더: \(folderName)")
+            Button(tr("게임 폴더 선택…")) { ClickSound.play(); showPicker = true }.foregroundColor(.cyan)
+            Text(folderName.isEmpty ? tr("게임 폴더가 선택되지 않았어요 (RBO_Ex3.exe와 DATA 폴더가 있는 곳)") : trf("폴더: %@", folderName))
                 .font(.footnote).foregroundColor(.gray)
             if !message.isEmpty { Text(message).font(.footnote).foregroundColor(.orange) }
+            HStack(spacing: 10) {                                   // language switch: 한국어 | English
+                Text("🌐").font(.system(size: 14))
+                ForEach(AppLang.allCases) { l in
+                    Button(action: { ClickSound.play(); langRaw = l.rawValue; message = "" }) {
+                        Text(l.label).font(.system(size: 14, weight: AppLang.current == l ? .bold : .regular))
+                            .foregroundColor(AppLang.current == l ? .white : .gray)
+                    }
+                    if l != AppLang.allCases.last { Text("|").font(.system(size: 14)).foregroundColor(.gray) }
+                }
+            }
         }
         .fixedSize(horizontal: true, vertical: false)   // panel hugs its content (Divider would otherwise stretch it full width)
         .padding(24)
@@ -65,7 +76,7 @@ struct LauncherView: View {
     }
 
     private func saveBookmark(_ url: URL) {
-        guard url.startAccessingSecurityScopedResource() else { message = "폴더 접근 권한을 얻지 못했어요."; return }
+        guard url.startAccessingSecurityScopedResource() else { message = tr("폴더 접근 권한을 얻지 못했어요."); return }
         defer { url.stopAccessingSecurityScopedResource() }
         if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
             bookmark = data; folderName = url.lastPathComponent; message = ""
@@ -81,10 +92,10 @@ struct LauncherView: View {
         var stale = false
         guard !bookmark.isEmpty,
               let url = try? URL(resolvingBookmarkData: bookmark, options: [], relativeTo: nil, bookmarkDataIsStale: &stale),
-              url.startAccessingSecurityScopedResource() else { message = "먼저 게임 폴더를 선택해 주세요."; return }
+              url.startAccessingSecurityScopedResource() else { message = tr("먼저 게임 폴더를 선택해 주세요."); return }
         let exe = url.appendingPathComponent(ed.exeName)
         guard FileManager.default.fileExists(atPath: exe.path) else {
-            message = "\(ed.exeName) 파일을 찾지 못했어요."; url.stopAccessingSecurityScopedResource(); return
+            message = trf("%@ 파일을 찾지 못했어요.", ed.exeName); url.stopAccessingSecurityScopedResource(); return
         }
         KeyConfigPatcher.apply(root: url)
         SystemConfigPatcher.apply(root: url, size: screenSize)  // the launcher's screen-size choice; the picture is always 640x480 and the GPU scales it

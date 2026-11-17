@@ -11,7 +11,7 @@ struct CheatButton: View {
         ZStack {
             Rectangle().strokeBorder(Color.white.opacity(open ? 0.80 : 0.32), lineWidth: 2)   // 테두리를 안쪽으로 그려서 PAUSE 그림과 바깥 크기가 같음
             GeometryReader { g in
-                Text("치트").font(.system(size: g.size.height * 0.50, weight: .bold))
+                Text(tr("치트")).font(.system(size: g.size.height * 0.50, weight: .bold))
                     .foregroundColor(Color.white.opacity(open ? 0.80 : 0.32))
                     .frame(width: g.size.width, height: g.size.height)
             }
@@ -28,10 +28,10 @@ struct CheatPanel: View {
     private let items: [Item] = [
         Item(name: "HP", base: 1000, setsValue: true),
         Item(name: "SP", base: 100, setsValue: true),
-        Item(name: "스킬 P", base: 5, setsValue: false),
-        Item(name: "스탯 P", base: 10, setsValue: false),
-        Item(name: "화살", base: 10, setsValue: false),
-        Item(name: "돈", base: 10, setsValue: false),
+        Item(name: tr("스킬 P"), base: 5, setsValue: false),
+        Item(name: tr("스탯 P"), base: 10, setsValue: false),
+        Item(name: tr("화살"), base: 10, setsValue: false),
+        Item(name: tr("돈"), base: 10, setsValue: false),
     ]
     @State private var values: [Int32] = Array(repeating: -1, count: 6)
     @State private var amounts: [Int] = [0, 0, 0, 0, 0, 0]   // 버튼에 표시·적용되는 값 (눌러서 바꿈)
@@ -45,7 +45,7 @@ struct CheatPanel: View {
     var body: some View {
         VStack(spacing: 4) {
             HStack {
-                Text("치트").font(.system(size: 14, weight: .bold)).foregroundColor(Color.white.opacity(0.9))
+                Text(tr("치트")).font(.system(size: 14, weight: .bold)).foregroundColor(Color.white.opacity(0.9))
                 Spacer()
                 Button(action: close) {
                     Text("✕").font(.system(size: 15, weight: .bold)).foregroundColor(Color.white.opacity(0.8))
@@ -69,15 +69,15 @@ struct CheatPanel: View {
     /// 숫자 입력창(UIAlertController: iOS 15에서도 동작). 확인은 값만 저장하고, 실행은 옆의 적용 버튼이 함.
     private func askAmount(_ i: Int) {
         let it = items[i]
-        let ac = UIAlertController(title: "\(it.name) \(it.setsValue ? "채우기" : "더하기")",
-                                   message: "0 ~ 9999 · 입력 후 옆의 적용 버튼을 누르면 실행돼요", preferredStyle: .alert)
+        let ac = UIAlertController(title: "\(it.name) \(it.setsValue ? tr("채우기") : tr("더하기"))",
+                                   message: tr("0 ~ 9999 · 입력 후 옆의 적용 버튼을 누르면 실행돼요"), preferredStyle: .alert)
         ac.addTextField { tf in
             tf.keyboardType = .numberPad
             tf.text = "\(self.amounts[i])"
             tf.clearsOnBeginEditing = true
         }
-        ac.addAction(UIAlertAction(title: "취소", style: .cancel))
-        ac.addAction(UIAlertAction(title: "확인", style: .default) { _ in
+        ac.addAction(UIAlertAction(title: tr("취소"), style: .cancel))
+        ac.addAction(UIAlertAction(title: tr("확인"), style: .default) { _ in
             let digits = String((ac.textFields?.first?.text ?? "").filter { $0.isNumber }.prefix(4))   // 최대 9,999
             guard let v = Int(digits) else { return }
             self.amounts[i] = v
@@ -98,7 +98,7 @@ struct CheatPanel: View {
             chip("+ \(amount(i))", on: false, width: 70) {
                 askAmount(i)
             }
-            chip("적용", on: false, width: 46) {
+            chip(tr("적용"), on: false, width: 46) {
                 if items[i].setsValue { rbo_cheat_set(Int32(i), Int32(amounts[i])) } else { rbo_cheat_add(Int32(i), Int32(amounts[i])) }
             }
         }
@@ -115,7 +115,7 @@ struct CheatPanel: View {
             pinTapAt[i] = Date()
             rbo_cheat_freeze(Int32(i), next ? 1 : 0)
         }) {
-            Text("고정").font(.system(size: 11, weight: .bold)).lineLimit(1).minimumScaleFactor(0.6)
+            Text(tr("고정")).font(.system(size: 11, weight: .bold)).lineLimit(1).minimumScaleFactor(0.6)
                 .foregroundColor(on ? Color.yellow : Color.white.opacity(0.9))
                 .frame(width: 38, height: 28)
                 .background(on ? Color.yellow.opacity(0.20) : Color.white.opacity(0.14))

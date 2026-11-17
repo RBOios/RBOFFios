@@ -12,10 +12,10 @@ struct VirtualPad: View {
     init(gameAspect: CGFloat = 4.0 / 3.0) { self.gameAspect = gameAspect }
     // Round buttons, laid out in a diamond. Units: fractions of the screen height, relative to the cluster centre.
     private let buttons: [(label: String, key: Int32, dx: CGFloat, dy: CGFloat)] = [
-        ("특수",   DIK.f,  0.0,    -0.130),   // top
-        ("방어",   DIK.d, -0.1075,  0.0),     // left
-        ("강 공격", DIK.s,  0.1075,  0.0),     // right
-        ("약 공격", DIK.a,  0.0,     0.130),   // bottom
+        (tr("특수"),   DIK.f,  0.0,    -0.130),   // top
+        (tr("방어"),   DIK.d, -0.1075,  0.0),     // left
+        (tr("강 공격"), DIK.s,  0.1075,  0.0),     // right
+        (tr("약 공격"), DIK.a,  0.0,     0.130),   // bottom
     ]
     private let buttonDiameter: CGFloat = 0.135   // of screen height
     private let clusterCentreY: CGFloat = 0.70    // of screen height
