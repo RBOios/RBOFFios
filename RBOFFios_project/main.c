@@ -39,6 +39,8 @@ void present_frame(const uint8_t *pix,int w,int h,int pitch,int bpp,uint32_t rm,
 static int g_save_frame=0, g_load_frame=0; static const char *g_save_file=NULL, *g_load_file=NULL;   /* test aids */
 int rbo_state_request(int op,const char *path);
 #ifndef RBO_LIBRARY
+#include <stdarg.h>
+void rbo_event(const char *fmt,...){ char b[160]; va_list ap; va_start(ap,fmt); vsnprintf(b,sizeof b,fmt,ap); va_end(ap); fprintf(stderr,"[event] frame=%d %s\n",g_frames,b); }   /* PC build: no rbo_api.c, so print events instead of queueing them for rbo_perf.txt */
 /* ---------- checkpoint server: pause at a frame, accept commands over a FIFO, fork experiments ---------- */
 void dx_script_add(int rel,int dik,int down);
 void dx_script_clear(void);
