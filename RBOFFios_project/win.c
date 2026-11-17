@@ -70,19 +70,31 @@ static void h_KillTimer(void){ for(int i=0;i<16;i++) if(timers[i].active&&timers
 static struct { uint32_t hwnd,msg,w,l; } pq[16]; static int pq_n=0;
 void win_post_message(uint32_t hwnd,uint32_t msg,uint32_t wp,uint32_t lp){ if(pq_n<16){ pq[pq_n].hwnd=hwnd; pq[pq_n].msg=msg; pq[pq_n].w=wp; pq[pq_n].l=lp; pq_n++; } }
 void dshow_movie_pump(void);
+#define PM_SPIN_POLLS 8        /* empty polls in one frame before it counts as a wait loop */
+#define PM_NAP_US     200      /* nap per further empty poll */
+extern int g_switch;
+static uint32_t pm_empty=0; static int pm_frame=-1, pm_nosleep=-1; static unsigned long pm_naps=0;
+unsigned long rbo_peek_naps(void){ return pm_naps; }
 static void h_PeekMessageA(void){
     dshow_movie_pump();
     uint64_t now=hle_now_us(); uint32_t msg=A(0);
     if(pq_n>0){
         wr32(msg,pq[0].hwnd); wr32(msg+4,pq[0].msg); wr32(msg+8,pq[0].w); wr32(msg+12,pq[0].l); wr32(msg+16,(uint32_t)(now/1000)); wr32(msg+20,0); wr32(msg+24,0);
         pq_n--; for(int i=0;i<pq_n;i++) pq[i]=pq[i+1];
-        RET(1); return;
+        pm_empty=0; RET(1); return;
     }
     for(int i=0;i<16;i++) if(timers[i].active&&now>=timers[i].next_us){
         Timer *t=&timers[i]; t->next_us=now+t->interval_us;   /* coalesce missed ticks like Windows */
         wr32(msg,t->hwnd); wr32(msg+4,0x113); wr32(msg+8,t->id); wr32(msg+12,t->proc); wr32(msg+16,(uint32_t)(now/1000)); wr32(msg+20,0); wr32(msg+24,0);
-        RET(1); return;
+        pm_empty=0; RET(1); return;
     }
+    /* The game's frame limiter is a PeekMessage loop that spins until the next 1/60 s tick, which keeps the CPU at 100% (heat, battery).
+     * A burst of empty polls inside one frame means "waiting for the next tick": let the other guest threads run, then nap briefly.
+     * The guest still decides when to continue (it re-reads the real-time clock), so pacing is unchanged. RBO_NOSPINSLEEP=1 disables this. */
+    if(g_frames!=pm_frame){ pm_frame=g_frames; pm_empty=0; }
+    if(pm_nosleep<0) pm_nosleep=getenv("RBO_NOSPINSLEEP")!=NULL;
+    static int polls=-1; if(polls<0){ const char *e=getenv("RBO_PEEK_POLLS"); polls=e?atoi(e):PM_SPIN_POLLS; }     /* test aid: lower the threshold to force the nap path */
+    if(++pm_empty>(uint32_t)polls && !pm_nosleep && !g_fast){ g_switch=1; hle_sleep_us(PM_NAP_US,2); pm_naps++; }
     RET(0);
 }
 static void h_DispatchMessageA(void){
