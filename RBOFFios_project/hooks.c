@@ -36,7 +36,8 @@
 #define F_FTOL  0x0047c4ecu   /* _ftol: st0 -> edx:eax, truncating                                  */
 #define F_MM3B   0x00412da0u   /* mm3b(dst, A, B)  cdecl: 3x3 multiply through the scratch floats at 0x80474c.. (hooks_ex.h) */
 #define F_SORT   0x0044e030u   /* sort(base, out, pcount, pspecial)  cdecl: collect + exchange-sort the 40-slot table (hooks_ex.h) */
-#define NH 9                   /* hooks: 0 conv, 1 rect, 2 scan, 3 mm4, 4 mm3, 5 vx, 6 ftol, 7 mm3b, 8 sort */
+#define F_ROTM   0x00413200u   /* rotm(dst, tx,ty,tz, ax,ay,az)  cdecl: rotation matrix from three angles in degrees + translation (hooks_ex.h) */
+#define NH 10                  /* hooks: 0 conv, 1 rect, 2 scan, 3 mm4, 4 mm3, 5 vx, 6 ftol, 7 mm3b, 8 sort, 9 rotm */
 #define F_LUT    0x00416f50u   /* build 4 x 256 u16 channel LUTs from a DDSURFACEDESC2 pixel format  */
 #define F_LOCK   0x00416b70u   /* lock(surf, desc) -> lpSurface or 0                                 */
 #define F_UNLOCK 0x00416c00u   /* unlock(surf)                                                       */
@@ -52,6 +53,7 @@ static const Sig sigs[] = {
     { F_FTOL, {0}, 0 },
     { F_MM3B, {0}, 0 },
     { F_SORT, {0}, 0 },
+    { F_ROTM, {0}, 0 },
 };
 
 static uint8_t saved[NH][8]; static int g_installed[NH];
@@ -165,7 +167,7 @@ static void rect_impl(void){
 /* ---------------- RBO_HOOKCHECK=1: shadow verification on real game data ----------------
  * For every call, snapshot the destination surface, run the native version, then restore the snapshot and run the
  * ORIGINAL guest code on the same arguments and compare the resulting surface bytes / return value.  Slow, debug only. */
-static int g_check=0; static uint64_t chk_calls=0, chk_bad=0, chk_skipped=0; static uint64_t chk_ex[2]={0,0};   /* checked calls of mm3b / sort */
+static int g_check=0; static uint64_t chk_calls=0, chk_bad=0, chk_skipped=0; static uint64_t chk_ex[3]={0,0,0};   /* checked calls of mm3b / sort */
 static uint8_t patch_bytes[NH][5];
 static void check_wrap(int which){
     uint32_t addr=sigs[which].addr; int nargs=which==0?8:11;
@@ -194,14 +196,14 @@ static void check_wrap(int which){
 }
 static void hook_conv(void){ if(g_check) check_wrap(0); else conv_impl(); }
 static void hook_rect(void){ if(g_check) check_wrap(1); else rect_impl(); }
-void rbo_hookcheck_report(void){ if(g_check) fprintf(stderr,"[hookcheck] FINAL calls=%llu mismatches=%llu skipped(fallback)=%llu  (mm3b=%llu sort=%llu)\n",(unsigned long long)chk_calls,(unsigned long long)chk_bad,(unsigned long long)chk_skipped,(unsigned long long)chk_ex[0],(unsigned long long)chk_ex[1]); }
+void rbo_hookcheck_report(void){ if(g_check) fprintf(stderr,"[hookcheck] FINAL calls=%llu mismatches=%llu skipped(fallback)=%llu  (mm3b=%llu sort=%llu rotm=%llu)\n",(unsigned long long)chk_calls,(unsigned long long)chk_bad,(unsigned long long)chk_skipped,(unsigned long long)chk_ex[0],(unsigned long long)chk_ex[1],(unsigned long long)chk_ex[2]); }
 
 /* ---------------- 0x412b40 / 0x412f00: float matrix multiplies ---------------- */
 #include "hooks_mm.h"
 #include "hooks_vx.h"
 #include "hooks_ex.h"
-static const uint8_t *const bodies[NH]={0,0,0,mm4_body,mm3_body,vx_body,ftol_body,mm3b_body,srt_body};
-static const int blen[NH]={0,0,0,(int)sizeof mm4_body,(int)sizeof mm3_body,(int)sizeof vx_body,(int)sizeof ftol_body,(int)sizeof mm3b_body,(int)sizeof srt_body};
+static const uint8_t *const bodies[NH]={0,0,0,mm4_body,mm3_body,vx_body,ftol_body,mm3b_body,srt_body,rotm_body};
+static const int blen[NH]={0,0,0,(int)sizeof mm4_body,(int)sizeof mm3_body,(int)sizeof vx_body,(int)sizeof ftol_body,(int)sizeof mm3b_body,(int)sizeof srt_body,(int)sizeof rotm_body};
 static int mm_range_ok(uint32_t p){ return (uint64_t)p+0x40<=MEM_SIZE; }
 /* cdecl (dst, A, B): the original prologue loads eax=A ecx=B edx=dst and leaves them there; the x87 stack is balanced at the ret */
 static void mm_common(int which){
@@ -294,6 +296,11 @@ static void mm3b_plain(void){
     if(!mm_range_ok(A)||!mm_range_ok(B)||!mm_range_ok(D)||!mm3b_native(A,B,D,&ecx,&edx)){ cpu.eip=F_MM3B+8; return; }   /* run the original after its 2-instruction prologue */
     cpu.r[EAX]=D; cpu.r[ECX]=ecx; cpu.r[EDX]=edx; cpu.eip=rd32(sp); cpu.r[ESP]=sp+4;
 }
+static void rotm_plain(void){
+    uint32_t sp=cpu.r[ESP];
+    if(!rotm_native(sp)){ cpu.r[EAX]=rd32(sp+0x14); cpu.r[ECX]=0x168; cpu.eip=F_ROTM+9; return; }   /* original, after its two leading instructions */
+    cpu.eip=rd32(sp); cpu.r[ESP]=sp+4;
+}
 static void sort_plain(void){
     uint32_t sp=cpu.r[ESP];
     if(!sort_native(sp)){ cpu.r[EAX]=rd32(sp+12); cpu.r[ECX]=rd32(sp+4); cpu.eip=F_SORT+8; return; }   /* original, after its two loads */
@@ -304,25 +311,27 @@ static void sort_plain(void){
 typedef struct { uint32_t a; uint32_t n; } Reg;
 static void check_wrap_ex(int which){
     uint32_t addr=sigs[which].addr, sp=cpu.r[ESP]; Reg R[8]; int nr=0; uint32_t nargs;
-    uint32_t a0=rd32(sp+4),a1=rd32(sp+8),a2=rd32(sp+12),a3=rd32(sp+16);
+    uint32_t a0=rd32(sp+4),a1=rd32(sp+8),a2=rd32(sp+12),a3=rd32(sp+16), a4=rd32(sp+20),a5=rd32(sp+24),a6=rd32(sp+28);
+    uint32_t fb_eip = which==9 ? addr+9 : addr+8;
     if(which==7){ nargs=3; R[nr++]=(Reg){a0,0x2c}; R[nr++]=(Reg){a1,0x2c}; R[nr++]=(Reg){a2,0x2c}; R[nr++]=(Reg){0x80474cu,0x2c}; }
+    else if(which==9){ nargs=7; R[nr++]=(Reg){a0,0x40}; R[nr++]=(Reg){0x805018u,0xb0}; }
     else        { nargs=4; R[nr++]=(Reg){a1,12*40+16}; R[nr++]=(Reg){a2,4}; R[nr++]=(Reg){a3,4}; R[nr++]=(Reg){0x24b41c8u,12}; R[nr++]=(Reg){a0,0x5c*40+0x40}; }
-    for(int k=0;k<nr;k++) if(!range_ok(R[k].a,R[k].n)){ chk_skipped++; if(which==7) mm3b_plain(); else sort_plain(); return; }
+    for(int k=0;k<nr;k++) if(!range_ok(R[k].a,R[k].n)){ chk_skipped++; if(which==7) mm3b_plain(); else if(which==9) rotm_plain(); else sort_plain(); return; }
     uint8_t *snap[8],*nat[8]; for(int k=0;k<nr;k++){ snap[k]=malloc(R[k].n); nat[k]=malloc(R[k].n); memcpy(snap[k],gmem+R[k].a,R[k].n); }
     uint32_t r0[8]; memcpy(r0,cpu.r,sizeof r0);
-    if(which==7) mm3b_plain(); else sort_plain();
-    if(cpu.eip==addr+8){ chk_skipped++; for(int k=0;k<nr;k++){ free(snap[k]); free(nat[k]); } return; }       /* fell back by itself */
+    if(which==7) mm3b_plain(); else if(which==9) rotm_plain(); else sort_plain();
+    if(cpu.eip==fb_eip){ chk_skipped++; for(int k=0;k<nr;k++){ free(snap[k]); free(nat[k]); } return; }       /* fell back by itself */
     uint32_t eip_n=cpu.eip, esp_n=cpu.r[ESP], eax_n=cpu.r[EAX], ecx_n=cpu.r[ECX], edx_n=cpu.r[EDX];
     uint8_t fl_n[5]={cpu.ZF,cpu.SF,cpu.CF,cpu.OF,cpu.PF};
     for(int k=0;k<nr;k++){ memcpy(nat[k],gmem+R[k].a,R[k].n); memcpy(gmem+R[k].a,snap[k],R[k].n); }
     memcpy(gmem+addr,saved[which],5);
     memcpy(cpu.r,r0,sizeof r0);
-    uint32_t args[4]={a0,a1,a2,a3}; uint32_t eax_o=guest_call(addr,(int)nargs,args);
+    uint32_t args[7]={a0,a1,a2,a3,a4,a5,a6}; uint32_t eax_o=guest_call(addr,(int)nargs,args);
     memcpy(gmem+addr,patch_bytes[which],5);
     chk_calls++; chk_ex[which-7]++; int bad=(eax_o!=eax_n)||ecx_n!=cpu.r[ECX]||edx_n!=cpu.r[EDX];
     if(which==8){ uint8_t fl_o[5]={cpu.ZF,cpu.SF,cpu.CF,cpu.OF,cpu.PF}; if(memcmp(fl_n,fl_o,5)) bad=1; }
     for(int k=0;k<nr&&!bad;k++) if(memcmp(nat[k],gmem+R[k].a,R[k].n)) bad=1;
-    if(bad){ chk_bad++; if(chk_bad<=20) fprintf(stderr,"[hookcheck] MISMATCH %s a0=%08x a1=%08x a2=%08x a3=%08x\n",which==7?"mm3b":"sort",a0,a1,a2,a3); }
+    if(bad){ chk_bad++; if(chk_bad<=20) fprintf(stderr,"[hookcheck] MISMATCH %s a0=%08x a1=%08x a2=%08x a3=%08x\n",which==7?"mm3b":which==9?"rotm":"sort",a0,a1,a2,a3); }
     if(chk_calls%500==0) fprintf(stderr,"[hookcheck] calls=%llu mismatches=%llu skipped(fallback)=%llu\n",(unsigned long long)chk_calls,(unsigned long long)chk_bad,(unsigned long long)chk_skipped);
     memcpy(cpu.r,r0,sizeof r0); cpu.r[EAX]=eax_n; cpu.r[ECX]=ecx_n; cpu.r[EDX]=edx_n; cpu.r[ESP]=esp_n; cpu.eip=eip_n;
     cpu.ZF=fl_n[0]; cpu.SF=fl_n[1]; cpu.CF=fl_n[2]; cpu.OF=fl_n[3]; cpu.PF=fl_n[4];
@@ -330,6 +339,7 @@ static void check_wrap_ex(int which){
 }
 static void hook_mm3b(void){ if(g_check) check_wrap_ex(7); else mm3b_plain(); }
 static void hook_sort(void){ if(g_check) check_wrap_ex(8); else sort_plain(); }
+static void hook_rotm(void){ if(g_check) check_wrap_ex(9); else rotm_plain(); }
 
 /* One HLE table entry serves three hooks: the thunk of hook_conv at +0, and +1 / +2 for mm4 / mm3 (the dispatcher uses
  * (eip-HLE_BASE)>>2 as the index, so the low two bits of EIP are free).  The HLE table therefore keeps its old size and hash,
@@ -339,9 +349,12 @@ static void hook_mux(void){
 }
 /* the scan hook's thunk is shared the same way: +0 = scan, +1 = _ftol (so vx and ftol did not add HLE table entries either) */
 static void hook_mux2(void){ switch(cpu.eip&3){ case 0: hook_scan(); break; case 1: hook_ftol(); break; case 2: hook_mm3b(); break; default: hook_sort(); break; } }
-static hle_fn fns[NH]={hook_conv,hook_rect,hook_mux2,hook_mm4,hook_mm3,hook_vx,hook_ftol,hook_mm3b,hook_sort};
+/* the rect hook's own HLE entry is shared too: +0 = rect, +1 = rotm */
+static void hook_mux3(void){ if(cpu.eip&3) hook_rotm(); else hook_rect(); }
+static hle_fn fns[NH]={hook_conv,hook_mux3,hook_mux2,hook_mm4,hook_mm3,hook_vx,hook_ftol,hook_mm3b,hook_sort,hook_rotm};
+static int mux3_idx=-1;
 static int mux_idx=-1, mux2_idx=-1;
-static const char *names[NH]={"hook_conv_0x414d10","hook_rect_0x415060","hook_scan_0x467169","hook_mm4_0x412b40","hook_mm3_0x412f00","hook_vx_0x4121c0","hook_ftol_0x47c4ec","hook_mm3b_0x412da0","hook_sort_0x44e030"};
+static const char *names[NH]={"hook_conv_0x414d10","hook_rect_0x415060","hook_scan_0x467169","hook_mm4_0x412b40","hook_mm3_0x412f00","hook_vx_0x4121c0","hook_ftol_0x47c4ec","hook_mm3b_0x412da0","hook_sort_0x44e030","hook_rotm_0x413200"};
 
 int rbo_hooks_installed(void){ int n=0; for(int i=0;i<NH;i++) n+=g_installed[i]; return n; }
 
@@ -356,6 +369,7 @@ void rbo_install_hooks_mask(int mask){
         uint32_t at=sigs[i].addr, target;
         if(i==0||i==3||i==4||i==5){ if(mux_idx<0) mux_idx=hle_register("rbo",names[0],-2,hook_mux); target=hle_thunk(mux_idx)+(i==0?0u:i==5?3u:(uint32_t)(i-2)); }
         else if(i==2||i==6||i==7||i==8){ if(mux2_idx<0) mux2_idx=hle_register("rbo",names[2],-2,hook_mux2); target=hle_thunk(mux2_idx)+(i==2?0u:i==6?1u:i==7?2u:3u); }
+        else if(i==1||i==9){ if(mux3_idx<0) mux3_idx=hle_register("rbo",names[1],-2,hook_mux3); target=hle_thunk(mux3_idx)+(i==1?0u:1u); }
         else target=hle_thunk(hle_register("rbo",names[i],-2,fns[i]));
         memcpy(saved[i],gmem+at,8);
         gmem[at]=0xE9; *(uint32_t*)(gmem+at+1)=target-(at+5); memcpy(patch_bytes[i],gmem+at,5);
@@ -378,5 +392,5 @@ void rbo_install_hooks(void){
     { const char *c=getenv("RBO_HOOKCHECK"); g_check=(c&&*c&&*c!='0'); }
     int mask=(1<<NH)-1; const char *m=getenv("RBO_HOOKMASK"); if(m&&*m) mask=atoi(m);
     rbo_install_hooks_mask(mask);
-    fprintf(stderr,"[hooks] installed: conv=%d rect=%d scan=%d mm4=%d mm3=%d vx=%d ftol=%d mm3b=%d sort=%d\n",g_installed[0],g_installed[1],g_installed[2],g_installed[3],g_installed[4],g_installed[5],g_installed[6],g_installed[7],g_installed[8]);
+    fprintf(stderr,"[hooks] installed: conv=%d rect=%d scan=%d mm4=%d mm3=%d vx=%d ftol=%d mm3b=%d sort=%d rotm=%d\n",g_installed[0],g_installed[1],g_installed[2],g_installed[3],g_installed[4],g_installed[5],g_installed[6],g_installed[7],g_installed[8],g_installed[9]);
 }
