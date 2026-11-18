@@ -1,0 +1,711 @@
+#include "hle.h"
+#include "state.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <unistd.h>
+#include <time.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <ctype.h>
+
+int g_trace=0;
+int g_retry=0; extern int g_blocked;
+int sched_nthreads(void); void sched_set_waiting(int w); uint64_t *sched_deadline_ptr(int *waiting); uint32_t sched_create(uint32_t start,uint32_t param); int sched_thread_status(uint32_t handle,uint32_t *code); void sched_set_exit_code(uint32_t code); int sched_current(void);
+int g_cur_idx=0; uint32_t g_cur_ra=0; int g_cur_th=0;   /* last HLE call: guest return address and thread (diagnostics) */
+const char *g_root=".";
+int g_max_frames=0, g_frames=0;
+
+/* ---------------- profiler ---------------- */
+static uint64_t now_ns(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (uint64_t)ts.tv_sec*1000000000ull+ts.tv_nsec; }
+#define PROF_MAX 4096
+static uint64_t pf_ns[PROF_MAX], pf_calls[PROF_MAX];       /* per HLE function: own time (ns) and call count */
+static uint64_t g_prof_hle_ns=0;                            /* total own time of all HLE functions */
+static uint64_t g_prof_guest_ns=0;                          /* time in nested guest code (guest_call), sleeps excluded */
+static uint64_t g_prof_sleep_ns[3]={0,0,0};                 /* sleeping, by source: Sleep / idle tick / vblank wait */
+static inline uint64_t prof_sleep_total(void){ return g_prof_sleep_ns[0]+g_prof_sleep_ns[1]+g_prof_sleep_ns[2]; }
+
+/* ---------------- registry ---------------- */
+#define MAX_HLE 4096
+static HleEntry tab[MAX_HLE];
+static int ntab=0;
+int hle_register(const char *dll,const char *name,int nargs,hle_fn fn){
+    tab[ntab].dll=strdup(dll); tab[ntab].name=strdup(name); tab[ntab].nargs=nargs; tab[ntab].fn=fn; return ntab++;
+}
+int hle_lookup(const char *dll,const char *name){
+    for(int i=0;i<ntab;i++) if(!strcasecmp(tab[i].dll,dll)&&!strcmp(tab[i].name,name)&&tab[i].fn) return i;
+    return -1;
+}
+const char* hle_name(int idx){ return idx>=0&&idx<ntab?tab[idx].name:"?"; }
+uint32_t hle_thunk(int idx){ return HLE_BASE+(uint32_t)idx*4; }
+
+void hle_dispatch_impl(uint32_t idx){
+    if(idx>=(uint32_t)ntab){ fprintf(stderr,"[BAD HLE idx %u] eip=%08x\n",idx,cpu.eip); abort(); }
+    HleEntry *e=&tab[idx];
+    if(!e->fn||e->nargs==-1){
+        fprintf(stderr,"[UNIMPLEMENTED] %s!%s called (ret=%08x, esp=%08x)\n",e->dll,e->name,rd32(cpu.r[ESP]),cpu.r[ESP]);
+        for(int i=0;i<6;i++) fprintf(stderr,"   arg%d=%08x\n",i,A(i));
+        fflush(stderr); abort();
+    }
+    if(g_trace>1) fprintf(stderr,"[hle] %s!%s(%08x,%08x,%08x,%08x)\n",e->dll,e->name,A(0),A(1),A(2),A(3));
+    uint32_t ra=rd32(cpu.r[ESP]);
+    uint32_t esp0=cpu.r[ESP];
+    g_cur_idx=(int)idx; g_cur_ra=ra; g_cur_th=sched_current(); g_retry=0;
+    uint64_t pt0=now_ns(), pg0=g_prof_guest_ns, ps0=prof_sleep_total();
+    e->fn();
+    { uint64_t dt=now_ns()-pt0, inner=(g_prof_guest_ns-pg0)+(prof_sleep_total()-ps0), own=dt>inner?dt-inner:0;
+      if(idx<PROF_MAX){ pf_ns[idx]+=own; pf_calls[idx]++; } g_prof_hle_ns+=own; }
+    if(cpu.halted||cpu.eip==THREAD_EXIT_MAGIC) return;
+    if(e->nargs==-2) return;          /* raw hook (hooks.c): the function set ESP/EIP itself */
+    if(g_retry){
+        if(g_nest>0||sched_nthreads()==1){ /* cannot block here: report timeout instead of spinning */
+            if(sched_nthreads()==1){ /* single thread: let virtual time pass so deadlines expire */
+                static int spins=0; if(++spins<200000){ extern void hle_idle_tick(void); hle_idle_tick(); return; }
+                spins=0; }
+            g_retry=0; sched_set_waiting(0); RET(258);
+        } else { g_blocked=1; g_switch=1; return; }
+    }
+    /* stdcall: pop return + args (nargs>=0). cdecl handled by fn setting nargs=0 */
+    cpu.r[ESP]=esp0+4+4*e->nargs;
+    cpu.eip=ra;
+}
+
+/* ---------------- guest heap ---------------- */
+#define HEAP_START 0x04000000u
+#define HEAP_END   0x1EF00000u
+static uint32_t heap_top=HEAP_START;
+typedef struct FreeNode { uint32_t addr; struct FreeNode *next; } FreeNode;
+#define NBUCKET 4096
+#define FIT_MIN   4096u      /* requests at least this big may reuse (and split) a larger free block */
+#define SPLIT_MIN 4096u      /* a split-off tail must hold at least this much */
+static FreeNode *freelist[NBUCKET];
+static uint32_t round_size(uint32_t s){ if(s<16)s=16; if(s<=2048) return (s+15)&~15u; return (s+4095)&~4095u; }
+static unsigned free_gen=0, coal_gen=~0u;    /* free_gen counts ga_free calls; the free lists are only re-merged when something was freed since the last merge */
+static int cmp_node_addr(const void *a,const void *b){ uint32_t x=(*(FreeNode *const*)a)->addr, y=(*(FreeNode *const*)b)->addr; return x<y?-1:x>y; }
+/* Merge neighbouring free blocks (a block of size S at address A ends at A+S; the next block's 16-byte header follows, so its payload starts at A+S+16).
+   Only pairs where at least one block is large are merged: runs of small blocks stay as they are so that exact-size reuse of small sizes keeps working. */
+static void coalesce_free(void){
+    unsigned n=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *x=freelist[b];x;x=x->next) n++;
+    coal_gen=free_gen; if(n<2) return;
+    FreeNode **arr=malloc(n*sizeof *arr); if(!arr) return;
+    unsigned k=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *x=freelist[b];x;x=x->next) arr[k++]=x;
+    qsort(arr,n,sizeof *arr,cmp_node_addr);
+    unsigned out=0;
+    for(unsigned i=0;i<n;i++){
+        if(out>0){
+            FreeNode *p=arr[out-1]; uint32_t ps=rd32(p->addr-16), cs=rd32(arr[i]->addr-16);
+            if(p->addr+ps+16==arr[i]->addr && (ps>=FIT_MIN||cs>=FIT_MIN)){
+                wr32(p->addr-16,ps+16+cs); free(arr[i]); continue;     /* p grows over arr[i] */
+            }
+        }
+        arr[out++]=arr[i];
+    }
+    if(out==n){ free(arr); return; }      /* nothing merged: leave the lists (and their order) untouched, so a loaded state and a continued run stay identical */
+    for(int b=0;b<NBUCKET;b++) freelist[b]=NULL;
+    for(unsigned i=out;i>0;i--){ FreeNode *x=arr[i-1]; unsigned b=(rd32(x->addr-16)/16)%NBUCKET; x->next=freelist[b]; freelist[b]=x; }   /* reverse insert keeps address order inside a bucket */
+    free(arr);
+}
+uint32_t ga_alloc(uint32_t size,int zero){
+    uint32_t rs=round_size(size);
+    unsigned b=(rs/16)%NBUCKET;
+    for(FreeNode **pp=&freelist[b];*pp;pp=&(*pp)->next){
+        FreeNode *n=*pp; uint32_t hs=rd32(n->addr-16);
+        if(hs==rs){ *pp=n->next; uint32_t a=n->addr; free(n); if(zero) memset(gmem+a,0,rs); return a; }
+    }
+    /* no exact fit: for large requests reuse the smallest free block that is big enough, splitting off the tail when it is worth keeping.
+       Without this a game that frees and re-allocates big buffers at changing sizes only ever grows the bump heap (and the save files). */
+    if(rs>=FIT_MIN){
+        if(coal_gen!=free_gen) coalesce_free();
+        FreeNode **best=NULL; uint32_t bs=0xFFFFFFFFu;
+        for(unsigned bb=0;bb<NBUCKET;bb++) for(FreeNode **pp=&freelist[bb];*pp;pp=&(*pp)->next){
+            uint32_t hs=rd32((*pp)->addr-16);
+            if(hs>=rs&&hs<bs){ bs=hs; best=pp; if(hs==rs) goto fit_found; }
+        }
+        fit_found:
+        if(best){
+            FreeNode *n=*best; *best=n->next; uint32_t a=n->addr; free(n);
+            if(bs-rs>=SPLIT_MIN+16){            /* keep the tail as its own free block */
+                uint32_t ra=a+rs+16, rsz=bs-rs-16;
+                wr32(a-16,rs);
+                wr32(ra-16,rsz); wr32(ra-12,0xA110CA7E);
+                FreeNode *r=malloc(sizeof *r); r->addr=ra; unsigned rb=(rsz/16)%NBUCKET; r->next=freelist[rb]; freelist[rb]=r;
+                bs=rs;
+            }
+            if(zero) memset(gmem+a,0,bs);
+            return a;
+        }
+    }
+    uint32_t a=heap_top+16;
+    if(a+rs>=HEAP_END){ fprintf(stderr,"[OOM] guest heap exhausted (req %u)\n",size); abort(); }
+    heap_top=a+rs;
+    wr32(a-16,rs); wr32(a-12,0xA110CA7E);
+    return a; /* fresh memory is zero */
+}
+uint32_t ga_size(uint32_t p){ return rd32(p-16); }
+void ga_free(uint32_t p){
+    if(!p) return;
+    if(rd32(p-12)!=0xA110CA7E){ fprintf(stderr,"[WARN] free of non-heap ptr %08x\n",p); return; }
+    uint32_t rs=rd32(p-16); unsigned b=(rs/16)%NBUCKET;
+    FreeNode *n=malloc(sizeof *n); n->addr=p; n->next=freelist[b]; freelist[b]=n; free_gen++;
+}
+static uint32_t scratch=0x00200000u;
+uint32_t ga_str(const char *s){ uint32_t a=ga_alloc(strlen(s)+1,0); strcpy((char*)gmem+a,s); return a; }
+
+/* ---------------- guest nested calls ---------------- */
+uint32_t guest_call(uint32_t fn,int n,const uint32_t *args){
+    uint32_t saved_esp=cpu.r[ESP], saved_eip=cpu.eip;
+    for(int i=n-1;i>=0;i--){ cpu.r[ESP]-=4; wr32(cpu.r[ESP],args[i]); }
+    cpu.r[ESP]-=4; wr32(cpu.r[ESP],EXIT_MAGIC);
+    cpu.eip=fn;
+    uint64_t gt0=now_ns(), gs0=prof_sleep_total();
+    g_nest++; cpu_run(EXIT_MAGIC); g_nest--;
+    { uint64_t el=now_ns()-gt0, sl=prof_sleep_total()-gs0; g_prof_guest_ns+= el>sl?el-sl:0; }
+    uint32_t r=cpu.r[EAX];
+    cpu.r[ESP]=saved_esp; cpu.eip=saved_eip;
+    return r;
+}
+
+/* ---------------- time ---------------- */
+static uint64_t now_us(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (uint64_t)ts.tv_sec*1000000u+ts.tv_nsec/1000; }
+static uint64_t t0_us;
+uint64_t g_stat_idle_us=0;   /* wall time spent sleeping instead of interpreting (for the on-screen stats) */
+void hle_sleep_us(uint64_t us,int src){ uint64_t a=now_ns(); usleep((useconds_t)us); uint64_t d=now_ns()-a; g_stat_idle_us+=d/1000; g_prof_sleep_ns[src<0||src>2?1:src]+=d; }
+int g_fast=0; static uint64_t vbase_ms=10000; static int vk=0;
+/* fast mode: guest time never runs slower than the frame clock (16.667 ms/frame); intra-frame timeGetTime ticks are
+   capped at 16 ms per frame and idle waits advance the base directly (so they are not counted twice). */
+static uint64_t vtime_ms(void){ return vbase_ms+(vk>16?16:vk); }
+void hle_vsync_advance(void){
+    if(!g_fast) return;
+    uint64_t ideal=10000+(uint64_t)(g_frames*16.6667), cur=vtime_ms();
+    vbase_ms = cur>ideal?cur:ideal; vk=0;
+    if(g_trace&&g_frames%300==0) fprintf(stderr,"[clock] frames=%d vtime=%llu ms (ideal %llu ms)\n",g_frames,(unsigned long long)vbase_ms,(unsigned long long)ideal);
+}
+/* Pause (app in the background / control centre): the emulator thread sleeps here, and the guest clock is moved forward by the time spent
+   so that timers, movie and sound do not see a huge jump when it continues. */
+volatile int g_paused=0;
+extern volatile int g_stop_req;
+void hle_pause_wait(void){
+    uint64_t s=now_us(), before=hle_now_us();
+    while(g_paused&&!g_stop_req){ usleep(20000); }
+    uint64_t d=now_us()-s; t0_us+=d;
+    if(getenv("RBO_PAUSE_DBG")) fprintf(stderr,"[pause] paused %llu ms, guest clock before=%llu after=%llu\n",(unsigned long long)(d/1000),(unsigned long long)before,(unsigned long long)hle_now_us());
+}
+
+/* ---------------- cheats: the functions of the PC trainer "rbo_ex3_trainer" (Cheat Engine table, RBO_Ex3.exe only) ----------------
+   Every cheat is one 32-bit value at a fixed address (trainer: "rbo_ex3.exe+offset", image base 0x400000).
+   Requests come from the UI thread and are carried out by the emulator thread (cheat_service, called from cpu_run), so the guest never sees a
+   half-written value. A frozen value is written back on every pass, like the trainer's freezer timer. */
+static const uint32_t cheat_addr[6]={0x2503A5Cu,0x2503A64u,0x2510ECCu,0x2510A00u,0xADEB38u,0xADFED8u};   /* HP, SP, skill pts, stat pts, arrows, money */
+typedef struct { int op,id,val; } CheatReq;                /* op: 1 set, 2 add, 3 freeze on (captures the current value), 4 freeze off */
+static CheatReq cq[32]; static volatile unsigned cq_h=0, cq_t=0;
+volatile int g_cheat_flag=0;                               /* non-zero: cheat_service has work (queued requests or frozen values) */
+static volatile int cheat_mask=0; static int cheat_fval[6];
+static int cheat_ok(void){ return gmem&&g_code_lo==0x401000u&&g_code_hi==0x486000u; }   /* the offsets are those of RBO_Ex3.exe */
+static int32_t cheat_clamp(int64_t v){ return v<0?0:(v>999999999?999999999:(int32_t)v); }
+int rbo_cheat_get(int id){ if(id<0||id>=6||!cheat_ok()) return -1; return (int)*(volatile uint32_t*)(gmem+cheat_addr[id]); }
+int rbo_cheat_frozen_mask(void){ return cheat_mask; }
+static void cheat_push(int op,int id,int val){
+    if(id<0||id>=6||!cheat_ok()) return;
+    unsigned h=cq_h; if(h-cq_t>=32) return;               /* queue full: drop (the UI cannot produce requests that fast) */
+    cq[h%32]=(CheatReq){op,id,val}; __atomic_store_n(&cq_h,h+1,__ATOMIC_RELEASE); g_cheat_flag=1;
+    { static const char *nm[6]={"HP","SP","스킬포인트","스탯포인트","화살","돈"}; static const char *opn[5]={"","설정","증감","고정","고정 해제"};
+      if(op==1||op==2) rbo_event("치트 %s %s %d",nm[id],opn[op],val); else rbo_event("치트 %s %s",nm[id],opn[op]); }
+}
+void rbo_cheat_set(int id,int value){ cheat_push(1,id,value); }
+void rbo_cheat_add(int id,int delta){ cheat_push(2,id,delta); }
+void rbo_cheat_freeze(int id,int on){ cheat_push(on?3:4,id,0); }
+void rbo_cheat_reset(void){ cq_t=cq_h; cheat_mask=0; g_cheat_flag=0; }   /* a new game starts: forget everything */
+void cheat_service(void){
+    if(!cheat_ok()) return;
+    while(cq_t!=__atomic_load_n(&cq_h,__ATOMIC_ACQUIRE)){
+        CheatReq r=cq[cq_t%32]; cq_t++;
+        uint32_t a=cheat_addr[r.id]; int32_t cur=(int32_t)rd32(a);
+        switch(r.op){
+        case 1: wr32(a,(uint32_t)cheat_clamp(r.val)); cheat_fval[r.id]=cheat_clamp(r.val); break;
+        case 2: { int32_t v=cheat_clamp((int64_t)cur+r.val); wr32(a,(uint32_t)v); cheat_fval[r.id]=v; } break;
+        case 3: cheat_fval[r.id]=cur; cheat_mask|=1<<r.id; break;
+        case 4: cheat_mask&=~(1<<r.id); break;
+        }
+    }
+    for(int i=0;i<6;i++) if(cheat_mask&(1<<i)) wr32(cheat_addr[i],(uint32_t)cheat_fval[i]);
+    if(!cheat_mask&&cq_t==cq_h) g_cheat_flag=0;
+}
+uint64_t hle_now_us(void){ if(g_fast) return vtime_ms()*1000ull; return now_us()-t0_us+10000000ull; }
+static uint32_t vnow(void){ if(g_fast){ vk++; return (uint32_t)vtime_ms(); } return (uint32_t)((now_us()-t0_us)/1000)+10000; }
+
+/* ---------------- files ---------------- */
+#define MAXH 256
+static struct { int fd; int used; char path[96]; char host[512]; int flags; } hs[MAXH];
+static uint32_t last_error=0;
+static int resolve_path_slow(const char *gpath,char *out,size_t outsz){
+    char tmp[1024]; size_t n=0;
+    for(const char*p=gpath;*p&&n<sizeof tmp-1;p++) tmp[n++]=(*p=='\\')?'/':*p;
+    tmp[n]=0;
+    char *s=tmp;
+    if(s[0]&&s[1]==':') s+=2;
+    if(s[0]=='.'&&s[1]=='/') s+=2;
+    while(s[0]=='/') s++;
+    snprintf(out,outsz,"%s",g_root);
+    char *save,*tok;
+    for(tok=strtok_r(s,"/",&save);tok;tok=strtok_r(NULL,"/",&save)){
+        if(!strcmp(tok,".")) continue;
+        DIR *d=opendir(out); if(!d) return 0;
+        struct dirent *de; int found=0;
+        while((de=readdir(d))){ if(!strcasecmp(de->d_name,tok)){ size_t l=strlen(out); snprintf(out+l,outsz-l,"/%s",de->d_name); found=1; break; } }
+        closedir(d);
+        if(!found){
+            size_t l=strlen(out); snprintf(out+l,outsz-l,"/%s",tok);
+            while((tok=strtok_r(NULL,"/",&save))){ l=strlen(out); snprintf(out+l,outsz-l,"/%s",tok); }
+            return 0;
+        }
+    }
+    return 1;
+}
+/* Cache of successful lookups.  The slow path opendir()s every directory of the path and scans it with strcasecmp, which is
+   expensive in big asset directories and runs for every CreateFileA/PathFileExistsA (hundreds per second when a message loads
+   its portrait/voice).  Only existing files are cached (a missing file may be created later); a hit is re-checked with access(). */
+#define RP_SLOTS 2048
+static struct { uint32_t h; char *key; char *host; } rp_cache[RP_SLOTS];
+static uint32_t rp_hash(const char *k){ uint32_t h=2166136261u; for(;*k;k++){ h^=(uint8_t)*k; h*=16777619u; } return h|1u; }
+int resolve_path(const char *gpath,char *out,size_t outsz){
+    char key[1024]; size_t n=0;
+    for(const char *p=gpath;*p&&n<sizeof key-1;p++){ char c=(*p=='\\')?'/':*p; if(c>='A'&&c<='Z') c+=32; key[n++]=c; }
+    key[n]=0;
+    uint32_t h=rp_hash(key), i=h%RP_SLOTS;
+    for(int probe=0;probe<8;probe++,i=(i+1)%RP_SLOTS){
+        if(rp_cache[i].h==h && rp_cache[i].key && !strcmp(rp_cache[i].key,key)){
+            if(strlen(rp_cache[i].host)<outsz && access(rp_cache[i].host,F_OK)==0){ snprintf(out,outsz,"%s",rp_cache[i].host); return 1; }
+            free(rp_cache[i].key); free(rp_cache[i].host); rp_cache[i].key=rp_cache[i].host=NULL; rp_cache[i].h=0; break;
+        }
+    }
+    int ex=resolve_path_slow(gpath,out,outsz);
+    if(ex){
+        i=h%RP_SLOTS; int slot=-1;
+        for(int probe=0;probe<8;probe++,i=(i+1)%RP_SLOTS) if(!rp_cache[i].key){ slot=(int)i; break; }
+        if(slot<0) slot=(int)(h%RP_SLOTS);                       /* all 8 probes taken: replace the first */
+        free(rp_cache[slot].key); free(rp_cache[slot].host);
+        rp_cache[slot].h=h; rp_cache[slot].key=strdup(key); rp_cache[slot].host=strdup(out);
+    }
+    return ex;
+}
+static uint32_t newhandle(int fd){ for(int i=1;i<MAXH;i++) if(!hs[i].used){ hs[i].used=1; hs[i].fd=fd; hs[i].path[0]=0; hs[i].host[0]=0; hs[i].flags=0; return 0x1000+i*4; } return 0xFFFFFFFF; }
+static int hfd(uint32_t h){ int i=(h-0x1000)/4; if(h<0x1000||i<=0||i>=MAXH||!hs[i].used) return -1; return hs[i].fd; }
+
+static void h_CreateFileA(void){
+    const char *p=(const char*)gmem+A(0); uint32_t acc=A(1), disp=A(4);
+    char host[1200]; int ex=resolve_path(p,host,sizeof host);
+    int flags; int w=(acc&0x40000000u)!=0;
+    switch(disp){ case 1: flags=O_RDWR|O_CREAT|O_EXCL; break; case 2: flags=O_RDWR|O_CREAT|O_TRUNC; break; case 3: flags=w?O_RDWR:O_RDONLY; break; case 4: flags=O_RDWR|O_CREAT; break; default: flags=O_RDWR|O_TRUNC; }
+    if(!w&&disp==3) flags=O_RDONLY;
+    if(g_trace) fprintf(stderr,"[CreateFileA] %s -> %s (%s)\n",p,host,ex?"exists":"missing");
+    int fd=open(host,flags,0644);
+    if(fd<0){ last_error= ex?5:2; RET(0xFFFFFFFF); return; }
+    last_error=0; { uint32_t hh=newhandle(fd); int ii=(hh-0x1000)/4; if(hh!=0xFFFFFFFF){ snprintf(hs[ii].path,sizeof hs[ii].path,"%s",p); snprintf(hs[ii].host,sizeof hs[ii].host,"%s",host); hs[ii].flags=flags; } RET(hh); }
+}
+static void h_ReadFile(void){
+    int fd=hfd(A(0)); uint32_t buf=A(1), n=A(2), pr=A(3);
+    if(fd<0){ RET(0); return; }
+    if(buf+n>=MEM_SIZE) gfault("ReadFile buf",buf);
+    ssize_t r=read(fd,gmem+buf,n);
+    if(r<0){ RET(0); return; }
+    if(g_trace>0 && getenv("RBO_READTRACE")){ int ii=(A(0)-0x1000)/4; static int c=0; if(c++<4000) fprintf(stderr,"[read] frame %d %s %u bytes\n",g_frames,hs[ii].path,n); }
+    if(pr) wr32(pr,(uint32_t)r);
+    RET(1);
+}
+static void h_WriteFile(void){
+    int fd=hfd(A(0)); uint32_t buf=A(1), n=A(2), pw=A(3);
+    if(A(0)<=3){ fwrite(gmem+buf,1,n,stderr); if(pw)wr32(pw,n); RET(1); return; }
+    if(fd<0){ RET(0); return; }
+    ssize_t r=write(fd,gmem+buf,n); if(pw) wr32(pw,r<0?0:(uint32_t)r); RET(r>=0);
+}
+static void h_SetFilePointer(void){
+    int fd=hfd(A(0)); if(fd<0){ RET(0xFFFFFFFF); return; }
+    int64_t off=(int32_t)A(1); uint32_t ph=A(2); if(ph) off=((int64_t)(int32_t)rd32(ph)<<32)|(uint32_t)A(1);
+    int wh=A(3)==0?SEEK_SET:A(3)==1?SEEK_CUR:SEEK_END;
+    off_t r=lseek(fd,off,wh); if(r<0){ RET(0xFFFFFFFF); return; }
+    if(ph) wr32(ph,(uint32_t)((uint64_t)r>>32));
+    RET((uint32_t)r);
+}
+static void h_GetFileSize(void){
+    int fd=hfd(A(0)); if(fd<0){RET(0xFFFFFFFF);return;}
+    struct stat st; fstat(fd,&st); if(A(1)) wr32(A(1),(uint32_t)((uint64_t)st.st_size>>32)); RET((uint32_t)st.st_size);
+}
+static void h_CloseHandle(void){ int i=(A(0)-0x1000)/4; if(A(0)>=0x1000&&i>0&&i<MAXH&&hs[i].used){ close(hs[i].fd); hs[i].used=0; } RET(1); }
+static void h_DeleteFileA(void){ char host[1200]; if(resolve_path((char*)gmem+A(0),host,sizeof host)) RET(unlink(host)==0); else RET(0); }
+static void h_SetFileAttributesA(void){ RET(1); }
+
+/* ---------------- process / misc ---------------- */
+static uint32_t cmdline_ptr, env_ptr;
+static void h_GetCommandLineA(void){ RET(cmdline_ptr); }
+static void h_GetStartupInfoA(void){ uint32_t p=A(0); memset(gmem+p,0,68); wr32(p,68); }
+static void h_GetVersion(void){ RET(0x0A280105u); }
+static void h_GetACP(void){ RET(949); }
+static void h_GetOEMCP(void){ RET(949); }
+static void h_GetCPInfo(void){ uint32_t p=A(1); memset(gmem+p,0,20); wr32(p,1); wr8(p+4,'?'); RET(1); }
+static void h_GetEnvironmentStrings(void){ RET(env_ptr); }
+static void h_GetEnvironmentStringsW(void){ RET(env_ptr); }
+static void h_FreeEnvironmentStrings(void){ RET(1); }
+static void h_SetHandleCount(void){ RET(A(0)); }
+static void h_GetStdHandle(void){ RET(A(0)==(uint32_t)-10?1:A(0)==(uint32_t)-11?2:3); }
+static void h_GetFileType(void){ RET(2); }
+static void h_SetStdHandle(void){ RET(1); }
+static void h_GetModuleHandleA(void){ RET(A(0)?0x70000000u:0x400000u); }
+static void h_GetModuleFileNameA(void){ const char *s="C:\\RBO\\rbo.exe"; uint32_t b=A(1); strcpy((char*)gmem+b,s); RET(strlen(s)); }
+static void h_GetProcAddress(void){ if(g_trace)fprintf(stderr,"[GetProcAddress] %s\n",(A(1)>0xFFFF)?(char*)gmem+A(1):"(ord)"); RET(0); }
+static void h_LoadLibraryA(void){ if(g_trace)fprintf(stderr,"[LoadLibraryA] %s\n",(char*)gmem+A(0)); RET(0); }
+static void h_ExitProcess(void){ fprintf(stderr,"[ExitProcess] code=%u frames=%d icount=%llu\n",A(0),g_frames,(unsigned long long)cpu.icount); cpu.halted=1; }
+static void h_TerminateProcess(void){ h_ExitProcess(); }
+static void h_GetCurrentProcess(void){ RET(0xFFFFFFFF); }
+static void h_GetLastError(void){ RET(last_error); }
+static void h_UnhandledExceptionFilter(void){ RET(1); }
+static void h_SetUnhandledExceptionFilter(void){ RET(0); }
+static void h_RtlUnwind(void){ fprintf(stderr,"[RtlUnwind] unsupported\n"); abort(); }
+static void h_RaiseException(void){ fprintf(stderr,"[RaiseException] code=%08x\n",A(0)); abort(); }
+static void h_Sleep(void){
+    /* Sleep(0) only gives up the time slice: it is not a wait. The game's main loop calls it after every 30 queued render commands (code@0x413dcf,
+       ~1400 times/s). It used to be handled like a timed wait (first call = "blocked", retried on the next turn), and every such call counted towards
+       the "all threads are blocked" streak in sched_switch, so every ~4th Sleep(0) ended in a 250 us idle sleep although the main thread had work
+       (perf log: idle ~11% of the time at 35-55 fps). Now it is a plain yield: switch to the next thread, no retry, no blocked mark. */
+    if(A(0)==0){ if(sched_nthreads()>1) g_switch=1; RET(0); return; }
+    if(sched_nthreads()>1){ /* multi-threaded: yield until the deadline passes */
+        int waiting; uint64_t *dl=sched_deadline_ptr(&waiting); uint64_t now=hle_now_us();
+        if(!waiting){ sched_set_waiting(1); *dl=now+(uint64_t)A(0)*1000ull; g_retry=1; return; }
+        if(now<*dl){ g_retry=1; return; }
+        sched_set_waiting(0); RET(0); return; }
+    if(g_fast) vk+=(int)A(0); else hle_sleep_us(A(0)*1000u,0); RET(0); }
+typedef struct { uint32_t ra; int th, idx; uint64_t n, prev; } IdleRec;
+static IdleRec idle_tab[96];   /* diagnostic: idle ticks by (thread, guest return address of the last HLE call): which guest code is sitting in the wait */
+void hle_idle_tick(void){
+    if(g_fast){ vbase_ms+=1; return; }
+    IdleRec *r=NULL; for(int i=0;i<96;i++){ if(idle_tab[i].n==0&&!idle_tab[i].ra){ r=&idle_tab[i]; r->ra=g_cur_ra; r->th=g_cur_th; r->idx=g_cur_idx; break; }
+        if(idle_tab[i].ra==g_cur_ra&&idle_tab[i].th==g_cur_th){ r=&idle_tab[i]; break; } }
+    if(r) r->n++;
+    hle_sleep_us(250,1); }
+static void h_GetTickCount(void){ RET(vnow()); }
+static void h_timeGetTime(void){ RET(vnow()); }
+static uint64_t qpc_fast=0;   /* RBO_FAST (test mode): a fully virtual, repeatable counter */
+static void h_QueryPerformanceCounter(void){ uint64_t t=now_us()-t0_us; if(g_fast){ qpc_fast+=20; t=vtime_ms()*1000ull-10000000ull+qpc_fast; } wr32(A(0),(uint32_t)t); wr32(A(0)+4,(uint32_t)(t>>32)); RET(1); }
+static void h_QueryPerformanceFrequency(void){ wr32(A(0),1000000); wr32(A(0)+4,0); RET(1); }
+static void fill_systime(uint32_t p,int local){
+    time_t t=g_fast?(time_t)1700000000:time(NULL); struct tm tm; if(local)localtime_r(&t,&tm); else gmtime_r(&t,&tm);
+    wr16(p,tm.tm_year+1900); wr16(p+2,tm.tm_mon+1); wr16(p+4,tm.tm_wday); wr16(p+6,tm.tm_mday);
+    wr16(p+8,tm.tm_hour); wr16(p+10,tm.tm_min); wr16(p+12,tm.tm_sec); wr16(p+14,0);
+}
+static void h_GetSystemTime(void){ fill_systime(A(0),0); }
+static void h_GetLocalTime(void){ fill_systime(A(0),1); }
+static void h_GetSystemTimeAsFileTime(void){ uint64_t t=(uint64_t)(g_fast?1700000000:time(NULL))*10000000ull+116444736000000000ull; wr32(A(0),(uint32_t)t); wr32(A(0)+4,(uint32_t)(t>>32)); }
+static void h_GetTimeZoneInformation(void){ memset(gmem+A(0),0,172); RET(0); }
+static void h_GetWindowsDirectoryA(void){ strcpy((char*)gmem+A(0),"C:\\WINDOWS"); RET(10); }
+
+static void h_HeapCreate(void){ RET(0x00500000u); }
+static void h_HeapDestroy(void){ RET(1); }
+static void h_HeapAlloc(void){ RET(ga_alloc(A(2),(A(1)&8)!=0)); }
+static void h_HeapFree(void){ ga_free(A(2)); RET(1); }
+static void h_HeapSize(void){ RET(ga_size(A(2))); }
+static void h_HeapReAlloc(void){
+    uint32_t p=A(2), n=A(3);
+    if(!p){ RET(ga_alloc(n,(A(1)&8)!=0)); return; }
+    uint32_t old=ga_size(p); if(n<=old){ RET(p); return; }
+    uint32_t q=ga_alloc(n,(A(1)&8)!=0); memcpy(gmem+q,gmem+p,old); ga_free(p); RET(q);
+}
+static void h_GlobalAlloc(void){ RET(ga_alloc(A(1),(A(0)&0x40)!=0)); }
+static void h_GlobalFree(void){ ga_free(A(0)); RET(0); }
+static void h_VirtualAlloc(void){
+    uint32_t addr=A(0), sz=A(1), type=A(2);
+    if(addr && !(type&0x2000)) { RET(addr); return; } /* commit inside reserved */
+    uint32_t a=ga_alloc((sz+4095)&~4095u,1); RET((a+4095)&~4095u);
+}
+static void h_VirtualFree(void){ RET(1); }
+static void h_IsBadReadPtr(void){ RET(A(0)==0); }
+static void h_IsBadWritePtr(void){ RET(A(0)==0); }
+static void h_IsBadCodePtr(void){ RET(A(0)==0); }
+static void h_lstrcpyA(void){ strcpy((char*)gmem+A(0),(char*)gmem+A(1)); RET(A(0)); }
+static void h_WideCharToMultiByte(void){
+    /* (cp, flags, wstr, wlen, mb, mblen, def, used) - ASCII only */
+    uint32_t ws=A(2); int wl=(int)A(3); uint32_t mb=A(4); int ml=(int)A(5);
+    if(wl<0){ wl=0; while(rd16(ws+2*wl)) wl++; wl++; }
+    if(ml==0){ RET(wl); return; }
+    int n=wl<ml?wl:ml; for(int i=0;i<n;i++) wr8(mb+i,(uint8_t)rd16(ws+2*i)); RET(n);
+}
+static void h_MultiByteToWideChar(void){
+    uint32_t mb=A(2); int ml=(int)A(3); uint32_t ws=A(4); int wl=(int)A(5);
+    if(ml<0){ ml=0; while(rd8(mb+ml)) ml++; ml++; }
+    if(wl==0){ RET(ml); return; }
+    int n=ml<wl?ml:wl; for(int i=0;i<n;i++) wr16(ws+2*i,rd8(mb+i)); RET(n);
+}
+static void h_LCMapStringA(void){ int n=(int)A(3); if(n<0){ n=strlen((char*)gmem+A(2))+1; } if(A(5)){ int m=(int)A(5); if(m<n)n=m; memcpy(gmem+A(4),gmem+A(2),n);} RET(n); }
+static void h_LCMapStringW(void){ int n=(int)A(3); if(n<0){ n=0; while(rd16(A(2)+2*n)) n++; n++; } if(A(5)){ int m=(int)A(5); if(m<n)n=m; memcpy(gmem+A(4),gmem+A(2),n*2);} RET(n); }
+static void h_GetStringTypeA(void){ int n=(int)A(3); if(n<0) n=strlen((char*)gmem+A(2))+1; for(int i=0;i<n;i++){ unsigned c=rd8(A(2)+i); uint16_t t=0; if(isupper(c))t|=1; if(islower(c))t|=2; if(isdigit(c))t|=4; if(isspace(c))t|=8; if(ispunct(c))t|=0x10; if(iscntrl(c))t|=0x20; if(c==' ')t|=0x40; if(isxdigit(c))t|=0x80; if(isalpha(c))t|=0x100; wr16(A(4)+2*i,t);} RET(1); }
+static void h_GetStringTypeW(void){ int n=(int)A(2); if(n<0){ n=0; while(rd16(A(1)+2*n)) n++; n++; } for(int i=0;i<n;i++){ unsigned c=rd16(A(1)+2*i); uint16_t t=0; if(c<128){ if(isupper(c))t|=1; if(islower(c))t|=2; if(isdigit(c))t|=4; if(isspace(c))t|=8; if(ispunct(c))t|=0x10; if(iscntrl(c))t|=0x20; if(isalpha(c))t|=0x100; } wr16(A(3)+2*i,t);} RET(1); }
+static void h_CompareStringA(void){ int c=strcmp((char*)gmem+A(2),(char*)gmem+A(4)); RET(c<0?1:c>0?3:2); }
+static void h_CompareStringW(void){ RET(2); }
+static void h_SetEnvironmentVariableA(void){ RET(1); }
+static void h_FlushFileBuffers(void){ RET(1); }
+static void h_CharUpperA(void){ uint32_t a=A(0); if(a<0x10000){ RET(toupper(a&0xFF)); return; } for(;rd8(a);a++) wr8(a,toupper(rd8(a))); RET(A(0)); }
+static void h_wsprintfA(void){
+    /* cdecl: wsprintfA(buf, fmt, ...) */
+    uint32_t out=A(0); const char *f=(const char*)gmem+A(1); int ai=2; char *o=(char*)gmem+out;
+    while(*f){
+        if(*f!='%'){ *o++=*f++; continue; }
+        f++; char spec[16]; int k=0; spec[k++]='%';
+        while(*f&&strchr("-+ #0123456789.l",*f)&&k<14) spec[k++]=*f++;
+        char c=*f++; char tmp[512];
+        if(c=='s'){ spec[k++]='s'; spec[k]=0; snprintf(tmp,sizeof tmp,spec,(char*)gmem+A(ai++)); }
+        else if(c=='c'){ spec[k++]='c'; spec[k]=0; snprintf(tmp,sizeof tmp,spec,(int)A(ai++)); }
+        else if(c=='%'){ strcpy(tmp,"%"); }
+        else { spec[k++]=c; spec[k]=0; if(strchr(spec,'l')) { char *l=strchr(spec,'l'); memmove(l,l+1,strlen(l)); } snprintf(tmp,sizeof tmp,spec,(unsigned)A(ai++)); }
+        strcpy(o,tmp); o+=strlen(tmp);
+    }
+    *o=0; RET(o-(char*)gmem-out);
+}
+
+/* ---------------- threads / sync objects ---------------- */
+typedef struct { int type; int signaled, manual; int count, maxcount; } Obj;   /* 1 event, 2 semaphore */
+static Obj objs[256]; static int nobjs=0;
+static Obj *obj_of(uint32_t h){ if(h<0x3000||h>=0x3000+256*4) return NULL; int i=(h-0x3000)/4; return i<nobjs?&objs[i]:NULL; }
+static uint32_t obj_new(int type,int signaled,int manual,int count,int maxc){ Obj *o=&objs[nobjs]; o->type=type; o->signaled=signaled; o->manual=manual; o->count=count; o->maxcount=maxc; return 0x3000+4*(nobjs++); }
+static void h_CreateEventA(void){ RET(obj_new(1,A(2)!=0,A(1)!=0,0,0)); }
+uint32_t hle_make_event(void){ return obj_new(1,0,1,0,0); }
+void hle_set_event(uint32_t h){ Obj *o=obj_of(h); if(o&&o->type==1) o->signaled=1; }
+static void h_SetEvent(void){ hle_set_event(A(0)); RET(1); }
+static void h_CreateSemaphoreA(void){ RET(obj_new(2,0,0,(int)A(1),(int)A(2))); }
+static void h_ReleaseSemaphore(void){ Obj *o=obj_of(A(0)); if(!o){RET(0);return;} if(A(2)) wr32(A(2),o->count); o->count+=(int)A(1); if(o->count>o->maxcount) o->count=o->maxcount; RET(1); }
+/* try to satisfy a wait on handle h; 1 if satisfied (and consumed) */
+static int wait_try(uint32_t h){
+    Obj *o=obj_of(h);
+    if(o){ if(o->type==1){ if(o->signaled){ if(!o->manual) o->signaled=0; return 1; } return 0; }
+           if(o->type==2){ if(o->count>0){ o->count--; return 1; } return 0; } }
+    uint32_t code; int st=sched_thread_status(h,&code); if(st==1) return 1; if(st==0) return 0;
+    return 1; /* unknown handle (file etc.): treat as signaled */
+}
+static int wait_expired(uint32_t timeout){
+    int waiting; uint64_t *dl=sched_deadline_ptr(&waiting); uint64_t now=hle_now_us();
+    if(!waiting){ sched_set_waiting(1); *dl=(timeout==0xFFFFFFFFu)?~0ull:now+(uint64_t)timeout*1000ull; return 0; }
+    return now>=*dl;
+}
+static void h_WaitForSingleObject(void){
+    uint32_t h=A(0), to=A(1);
+    if(wait_try(h)){ sched_set_waiting(0); RET(0); return; }
+    if(to==0){ sched_set_waiting(0); RET(258); return; }
+    if(wait_expired(to)){ if(g_trace) fprintf(stderr,"[wait] timeout h=%08x ret=%08x frame %d\n",h,rd32(cpu.r[ESP]),g_frames); sched_set_waiting(0); RET(258); return; }
+    { static int n=0; if(g_trace&&n++<12) fprintf(stderr,"[wait] block h=%08x to=%u ret=%08x frame %d obj=%d\n",h,to,rd32(cpu.r[ESP]),g_frames,obj_of(h)?obj_of(h)->type:-1); }
+    g_retry=1;
+}
+static struct { int th; uint32_t n,all,to,h[8]; } dbg_wfm;
+static void wfm_impl(void){
+    uint32_t n=A(0), hp=A(1), all=A(2), to=A(3);
+    dbg_wfm.th=sched_current(); dbg_wfm.n=n; dbg_wfm.all=all; dbg_wfm.to=to; for(uint32_t i=0;i<n&&i<8;i++) dbg_wfm.h[i]=rd32(hp+4*i);
+    if(all){ int ok=1; for(uint32_t i=0;i<n;i++){ Obj *o=obj_of(rd32(hp+4*i)); uint32_t c; int st=sched_thread_status(rd32(hp+4*i),&c);
+            int sig = o ? (o->type==1?o->signaled:o->count>0) : (st==1||st<0); if(!sig) ok=0; }
+        if(ok){ for(uint32_t i=0;i<n;i++) wait_try(rd32(hp+4*i)); sched_set_waiting(0); RET(0); return; } }
+    else for(uint32_t i=0;i<n;i++) if(wait_try(rd32(hp+4*i))){ sched_set_waiting(0); RET(i); return; }
+    if(to==0){ sched_set_waiting(0); RET(258); return; }
+    if(wait_expired(to)){ sched_set_waiting(0); RET(258); return; }
+    g_retry=1;
+}
+/* The game's DirectSound music thread loops WaitForMultipleObjects -> Lock -> fill/silence -> Unlock about a million times per second (perf log:
+   Lock/Unlock/WaitForMultipleObjects 1.0-1.1M calls/s, code@0x41a5e0-0x41a8ff = ~36% of all interpreted time). Because threads are cooperative and
+   only switch every 131072 instructions, that loop took half of the CPU from the main thread and the game dropped to ~40 fps whenever a stage got
+   busy. A completed wait on a worker thread now hands the CPU back to the other thread right away, so the loop runs once per slice
+   (~1-2K times/s) - far more than the few notify events per second that the stream needs. */
+static void h_WaitForMultipleObjects(void){
+    wfm_impl();
+    if(!g_retry && sched_nthreads()>1 && sched_current()!=0) g_switch=1;
+}
+static void h_CreateThread(void){
+    uint32_t h=sched_create(A(2),A(3)); if(A(5)) wr32(A(5),0x1000+sched_nthreads());
+    RET(h);
+}
+static void h_ExitThread(void){ sched_set_exit_code(A(0)); cpu.eip=THREAD_EXIT_MAGIC; cpu.r[EAX]=A(0); /* handled by cpu_run */ }
+static void h_TerminateThread(void){ RET(1); }
+void sched_dump(void); void ds_debug_dump(void); void ds_wake_all_notify(void);
+static void join_diag(void){
+    fprintf(stderr,"[join] main thread keeps polling GetExitCodeThread, the worker does not finish. Threads:\n"); sched_dump();
+    fprintf(stderr,"[join] last WaitForMultipleObjects: thread=%d n=%u waitAll=%u timeout=%u\n",dbg_wfm.th,dbg_wfm.n,dbg_wfm.all,dbg_wfm.to);
+    for(uint32_t i=0;i<dbg_wfm.n&&i<8;i++){ Obj *o=obj_of(dbg_wfm.h[i]);
+        fprintf(stderr,"   handle %08x type=%d signaled=%d manual=%d count=%d\n",dbg_wfm.h[i],o?o->type:-1,o?o->signaled:-1,o?o->manual:-1,o?o->count:-1); }
+    ds_debug_dump();
+}
+static void h_GetExitCodeThread(void){
+    static int join_polls=0;
+    uint32_t c=259; int st=sched_thread_status(A(0),&c); if(A(1)) wr32(A(1),c);
+    /* The game joins a worker thread (its DirectSound music-streaming thread, after IDirectSoundBuffer::Stop) by polling this call in a tight
+       loop (code@0x41ae80). Threads are cooperative and only switch at blocking calls / frame boundaries, so while the thread is still running
+       we must yield here - otherwise the worker never runs and the main thread spins forever (frozen black screen, 0 fps). */
+    if(st==0 && sched_nthreads()>1){
+        g_blocked=1; g_switch=1; join_polls++;
+        if(join_polls==20000) join_diag();                      /* once: what everybody is waiting for -> rbo_log.txt */
+        if(join_polls>=60000 && join_polls%60000==0){           /* deadlock: wake the worker through every DirectSound notification event */
+            fprintf(stderr,"[join] worker still alive after %d polls - signalling all DirectSound notify events\n",join_polls); ds_wake_all_notify();
+        }
+    } else join_polls=0;
+    RET(1);
+}
+/* critical sections: RTL_CRITICAL_SECTION owner at +12 (thread id), recursion at +8 */
+static void h_InitCS(void){ memset(gmem+A(0),0,24); }
+static void h_EnterCS(void){
+    uint32_t cs=A(0), me=sched_current()+1, owner=rd32(cs+12);
+    if(owner==0||owner==me||sched_nthreads()==1){ wr32(cs+12,me); wr32(cs+8,rd32(cs+8)+1); return; }
+    g_retry=1;
+}
+static void h_LeaveCS(void){ uint32_t cs=A(0); uint32_t r=rd32(cs+8); if(r>0) r--; wr32(cs+8,r); if(r==0) wr32(cs+12,0); }
+static void h_CS(void){ }
+static void h_UnmapViewOfFile(void){ RET(1); }
+static void h_zero(void){ RET(0); }
+static void h_one(void){ RET(1); }
+
+#define R(dll,name,n,fn) hle_register(dll,name,n,fn)
+void hle_init(void){
+    t0_us=now_us(); g_fast=getenv("RBO_FAST")!=NULL;
+    hle_dispatch=hle_dispatch_impl;
+    cmdline_ptr=ga_str("rbo.exe");
+    env_ptr=ga_alloc(16,1);
+    const char *K="KERNEL32.dll";
+    R(K,"GetCommandLineA",0,h_GetCommandLineA); R(K,"GetStartupInfoA",1,h_GetStartupInfoA);
+    R(K,"GetSystemTime",1,h_GetSystemTime); R(K,"GetLocalTime",1,h_GetLocalTime);
+    R(K,"GetSystemTimeAsFileTime",1,h_GetSystemTimeAsFileTime); R(K,"GetTimeZoneInformation",1,h_GetTimeZoneInformation);
+    R(K,"HeapReAlloc",4,h_HeapReAlloc); R(K,"HeapSize",3,h_HeapSize); R(K,"HeapDestroy",1,h_HeapDestroy);
+    R(K,"HeapCreate",3,h_HeapCreate); R(K,"HeapAlloc",3,h_HeapAlloc); R(K,"HeapFree",3,h_HeapFree);
+    R(K,"RtlUnwind",4,h_RtlUnwind); R(K,"TerminateProcess",2,h_TerminateProcess); R(K,"ExitProcess",1,h_ExitProcess);
+    R(K,"GetVersion",0,h_GetVersion); R(K,"GetACP",0,h_GetACP); R(K,"GetOEMCP",0,h_GetOEMCP); R(K,"GetCPInfo",2,h_GetCPInfo);
+    R(K,"UnhandledExceptionFilter",1,h_UnhandledExceptionFilter); R(K,"SetUnhandledExceptionFilter",1,h_SetUnhandledExceptionFilter);
+    R(K,"FreeEnvironmentStringsA",1,h_FreeEnvironmentStrings); R(K,"FreeEnvironmentStringsW",1,h_FreeEnvironmentStrings);
+    R(K,"GetEnvironmentStrings",0,h_GetEnvironmentStrings); R(K,"GetEnvironmentStringsW",0,h_GetEnvironmentStringsW);
+    R(K,"WideCharToMultiByte",8,h_WideCharToMultiByte); R(K,"MultiByteToWideChar",6,h_MultiByteToWideChar);
+    R(K,"SetHandleCount",1,h_SetHandleCount); R(K,"GetStdHandle",1,h_GetStdHandle); R(K,"GetFileType",1,h_GetFileType);
+    R(K,"VirtualFree",3,h_VirtualFree); R(K,"VirtualAlloc",4,h_VirtualAlloc);
+    R(K,"IsBadWritePtr",2,h_IsBadWritePtr); R(K,"IsBadReadPtr",2,h_IsBadReadPtr); R(K,"IsBadCodePtr",1,h_IsBadCodePtr);
+    R(K,"GlobalFree",1,h_GlobalFree); R(K,"GlobalAlloc",2,h_GlobalAlloc);
+    R(K,"Sleep",1,h_Sleep); R(K,"QueryPerformanceCounter",1,h_QueryPerformanceCounter); R(K,"QueryPerformanceFrequency",1,h_QueryPerformanceFrequency);
+    R(K,"GetProcAddress",2,h_GetProcAddress); R(K,"LoadLibraryA",1,h_LoadLibraryA); R(K,"GetTickCount",0,h_GetTickCount);
+    R(K,"GetWindowsDirectoryA",2,h_GetWindowsDirectoryA); R(K,"DeleteFileA",1,h_DeleteFileA);
+    R(K,"SetUnhandledExceptionFilter",1,h_SetUnhandledExceptionFilter); R(K,"GetModuleHandleA",1,h_GetModuleHandleA);
+    R(K,"GetFileSize",2,h_GetFileSize); R(K,"CreateFileA",7,h_CreateFileA); R(K,"CreateEventA",4,h_CreateEventA);
+    R(K,"CloseHandle",1,h_CloseHandle); R(K,"UnmapViewOfFile",1,h_UnmapViewOfFile); R(K,"GetExitCodeThread",2,h_GetExitCodeThread);
+    R(K,"SetEvent",1,h_SetEvent); R(K,"CreateThread",6,h_CreateThread); R(K,"WaitForMultipleObjects",4,h_WaitForMultipleObjects);
+    R(K,"ExitThread",1,h_ExitThread); R(K,"TerminateThread",2,h_TerminateThread);
+    R(K,"LeaveCriticalSection",1,h_LeaveCS); R(K,"EnterCriticalSection",1,h_EnterCS); R(K,"DeleteCriticalSection",1,h_CS); R(K,"InitializeCriticalSection",1,h_InitCS);
+    R(K,"SetFileAttributesA",2,h_SetFileAttributesA); R(K,"ReadFile",5,h_ReadFile); R(K,"WriteFile",5,h_WriteFile);
+    R(K,"SetFilePointer",4,h_SetFilePointer); R(K,"CreateSemaphoreA",4,h_CreateSemaphoreA); R(K,"ReleaseSemaphore",3,h_ReleaseSemaphore);
+    R(K,"WaitForSingleObject",2,h_WaitForSingleObject); R(K,"lstrcpyA",2,h_lstrcpyA); R(K,"GetLastError",0,h_GetLastError);
+    R(K,"GetCurrentProcess",0,h_GetCurrentProcess); R(K,"GetModuleFileNameA",3,h_GetModuleFileNameA);
+    R(K,"SetEnvironmentVariableA",2,h_SetEnvironmentVariableA); R(K,"LCMapStringA",6,h_LCMapStringA); R(K,"LCMapStringW",6,h_LCMapStringW);
+    R(K,"GetStringTypeA",5,h_GetStringTypeA); R(K,"GetStringTypeW",4,h_GetStringTypeW); R(K,"SetStdHandle",2,h_SetStdHandle);
+    R(K,"RaiseException",4,h_RaiseException); R(K,"FlushFileBuffers",1,h_FlushFileBuffers);
+    R(K,"CompareStringA",6,h_CompareStringA); R(K,"CompareStringW",6,h_CompareStringW);
+    R("WINMM.dll","timeGetTime",0,h_timeGetTime);
+    R("USER32.dll","wsprintfA",0,h_wsprintfA);   /* cdecl: fixed below */
+    R("USER32.dll","CharUpperA",1,h_CharUpperA);
+    (void)h_zero; (void)h_one; (void)scratch;
+    win_register(); ddraw_register(); dinput_register(); dsound_register();
+}
+
+/* ---------------- save state ---------------- */
+uint32_t hle_heap_top(void){ return heap_top; }
+/* Payload ranges [lo,hi) of every free heap block, sorted by address (malloc'd array of lo,hi pairs; caller frees). Freed memory is dead data: state.c leaves it out of a save. */
+static int cmp_u32pair(const void *a,const void *b){ uint32_t x=*(const uint32_t*)a, y=*(const uint32_t*)b; return x<y?-1:x>y; }
+uint32_t hle_free_ranges(uint32_t **out){
+    uint32_t n=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *x=freelist[b];x;x=x->next) n++;
+    uint32_t *r=malloc((n?n:1)*2*sizeof *r); if(!r){ *out=NULL; return 0; }
+    uint32_t k=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *x=freelist[b];x;x=x->next){ r[2*k]=x->addr; r[2*k+1]=x->addr+rd32(x->addr-16); k++; }
+    qsort(r,k,2*sizeof *r,cmp_u32pair);
+    *out=r; return k;
+}
+uint64_t hle_free_bytes(void){ uint64_t t=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next) t+=rd32(n->addr-16); return t; }
+uint32_t hle_free_blocks(void){ uint32_t c=0; for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next) c++; return c; }
+uint32_t hle_tab_count(void){ return (uint32_t)ntab; }
+uint64_t hle_tab_hash(void){
+    uint64_t h=1469598103934665603ull;
+    for(int i=0;i<ntab;i++){
+        for(const char *p=tab[i].dll;*p;p++){ h^=(uint8_t)tolower((unsigned char)*p); h*=1099511628211ull; }
+        h^=0xFF; h*=1099511628211ull;
+        for(const char *p=tab[i].name;*p;p++){ h^=(uint8_t)*p; h*=1099511628211ull; }
+        h^=(uint32_t)tab[i].nargs; h*=1099511628211ull;
+    }
+    return h;
+}
+void hle_state(StateIO *io){
+    st_tag(io,"HLE0");
+    /* the game folder at save time: open files are stored with their full host path, which changes when the app is reinstalled (the app
+       container has a new id) or the game folder is moved, so on load the old folder prefix is replaced by the current one */
+    char saved_root[512]; if(!io->load) snprintf(saved_root,sizeof saved_root,"%s",g_root);
+    STX(io,saved_root);
+    STX(io,heap_top); STX(io,last_error); STX(io,cmdline_ptr); STX(io,env_ptr);
+    /* free lists: the order inside a bucket decides which block is handed out next, so it is kept exactly */
+    uint32_t total=0;
+    if(!io->load){ for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next) total++; }
+    STX(io,total);
+    if(io->load){
+        for(int b=0;b<NBUCKET;b++){ FreeNode *n=freelist[b]; while(n){ FreeNode *x=n->next; free(n); n=x; } freelist[b]=NULL; }
+        static FreeNode *tail[NBUCKET]; memset(tail,0,sizeof tail);
+        for(uint32_t i=0;i<total&&!io->err;i++){
+            uint32_t bk,addr; STX(io,bk); STX(io,addr); if(io->err||bk>=NBUCKET) { io->err=ST_ERR_IO; break; }
+            FreeNode *n=malloc(sizeof *n); n->addr=addr; n->next=NULL;
+            if(tail[bk]) tail[bk]->next=n; else freelist[bk]=n; tail[bk]=n;
+        }
+    } else {
+        for(int b=0;b<NBUCKET;b++) for(FreeNode *n=freelist[b];n;n=n->next){ uint32_t bk=(uint32_t)b, addr=n->addr; STX(io,bk); STX(io,addr); }
+    }
+    /* open files: path + mode + position (the host descriptor itself cannot be saved) */
+    for(int i=0;i<MAXH;i++){
+        int used=hs[i].used; int64_t off=0;
+        if(!io->load&&used&&hs[i].fd>=0){ off=(int64_t)lseek(hs[i].fd,0,SEEK_CUR); }
+        STX(io,used); STX(io,off);
+        char host[512]; int flags=hs[i].flags;
+        if(!io->load) memcpy(host,hs[i].host,sizeof host);
+        STX(io,flags); st_raw(io,host,sizeof host);
+        char gp[96]; if(!io->load) memcpy(gp,hs[i].path,sizeof gp); st_raw(io,gp,sizeof gp);
+        if(io->load){
+            { size_t rl=strlen(saved_root); while(rl>1&&saved_root[rl-1]=='/') rl--;
+              if(rl>0&&host[0]&&!strncmp(host,saved_root,rl)&&(host[rl]=='/'||host[rl]==0)){
+                  size_t cl=strlen(g_root); while(cl>1&&g_root[cl-1]=='/') cl--;
+                  char t[512]; snprintf(t,sizeof t,"%.*s%s",(int)cl,g_root,host+rl); snprintf(host,sizeof host,"%s",t); } }
+            if(hs[i].used&&hs[i].fd>=0) close(hs[i].fd);
+            hs[i].used=used; hs[i].fd=-1; hs[i].flags=flags; memcpy(hs[i].host,host,sizeof host); memcpy(hs[i].path,gp,sizeof gp);
+            if(used&&host[0]){
+                int fd=open(host,flags&~(O_CREAT|O_TRUNC|O_EXCL),0644);
+                if(fd>=0){ lseek(fd,(off_t)off,SEEK_SET); hs[i].fd=fd; }
+                else fprintf(stderr,"[state] cannot reopen %s\n",host);
+            }
+        }
+    }
+    STX(io,objs); STX(io,nobjs);
+    /* clocks: the guest clock continues from where it was saved */
+    uint64_t vus=0; if(!io->load) vus=now_us()-t0_us;
+    STX(io,vus); STX(io,vbase_ms); STX(io,vk); STX(io,g_frames); STX(io,qpc_fast);
+    if(io->load) t0_us=now_us()-vus;
+}
+
+/* Per-second profile for the on-screen overlay. Call from one thread (the UI timer). */
+int hle_prof_report(char *out,int n,int topk){
+    static uint64_t pr_wall=0, pr_hle=0, pr_sl[3]={0,0,0}, pr_ns[PROF_MAX], pr_calls[PROF_MAX];
+    uint64_t w=now_ns(), hle=g_prof_hle_ns, sl[3]={g_prof_sleep_ns[0],g_prof_sleep_ns[1],g_prof_sleep_ns[2]};
+    uint64_t cns[PROF_MAX], ccalls[PROF_MAX]; int nt=ntab<PROF_MAX?ntab:PROF_MAX;
+    for(int i=0;i<nt;i++){ cns[i]=pf_ns[i]; ccalls[i]=pf_calls[i]; }
+    int first=(pr_wall==0); double dw=(double)(w-pr_wall);
+    int len=0;
+    if(first||dw<=0) len=snprintf(out,n,"측정 중…");
+    else {
+        double dh=(double)(hle-pr_hle), d0=(double)(sl[0]-pr_sl[0]), d1=(double)(sl[1]-pr_sl[1]), d2=(double)(sl[2]-pr_sl[2]);
+        double ds=d0+d1+d2, di=dw-dh-ds; if(di<0) di=0;
+        len=snprintf(out,n,"인터프리터 %.0f%% · HLE %.0f%% · 대기 %.0f%%\n대기: Sleep %.0f%% · 유휴틱 %.0f%% · vblank %.0f%%",
+            100*di/dw,100*dh/dw,100*ds/dw,100*d0/dw,100*d1/dw,100*d2/dw);
+        int used[16]; for(int k=0;k<16;k++) used[k]=-1; if(topk>16) topk=16;
+        for(int k=0;k<topk;k++){
+            int best=-1; uint64_t bv=0;
+            for(int i=0;i<nt;i++){ int skip=0; for(int j=0;j<k;j++) if(used[j]==i) skip=1; if(skip) continue;
+                uint64_t dv=cns[i]-pr_ns[i]; if(dv>bv){ bv=dv; best=i; } }
+            if(best<0) break; used[k]=best;
+            double ms=(double)bv/1e6*(1e9/dw), calls=(double)(ccalls[best]-pr_calls[best])*(1e9/dw);
+            if(len<n) len+=snprintf(out+len,n-len,"\n%-24.24s %5.1fms/s %7.0f회/s",hle_name(best),ms,calls);
+        }
+    }
+    if(!first&&dw>0){ for(int k=0;k<3;k++){ int bi=-1; uint64_t bv=0; for(int i=0;i<96;i++){ uint64_t dv=idle_tab[i].n-idle_tab[i].prev; if(dv>bv){ bv=dv; bi=i; } }
+        if(bi<0||bv==0) break; if(len<n) len+=snprintf(out+len,n-len,"\n유휴틱 스레드%d %s 호출위치 %08x %.0f회/s",idle_tab[bi].th,hle_name(idle_tab[bi].idx),idle_tab[bi].ra,(double)bv*(1e9/dw)); idle_tab[bi].prev=idle_tab[bi].n; }
+      for(int i=0;i<96;i++) idle_tab[i].prev=idle_tab[i].n; }
+    pr_wall=w; pr_hle=hle; for(int i=0;i<3;i++) pr_sl[i]=sl[i];
+    for(int i=0;i<nt;i++){ pr_ns[i]=cns[i]; pr_calls[i]=ccalls[i]; }
+    return len;
+}
