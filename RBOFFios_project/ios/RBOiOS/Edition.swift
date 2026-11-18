@@ -9,7 +9,7 @@ enum Edition: String, CaseIterable, Identifiable {
     var exeName: String { "RBO_Ex3.exe" }
 }
 
-/// Clears the 2P/3P keyboard assignments (KeyConfig.cdt/.v2/.v3/.v4), keeping a .bak of the originals.
+/// Clears the 2P/3P keyboard assignments (KeyConfig.cdt/.v2/.v3/.v4), keeping a .bak of the originals; also writes player 1's keys (see applyPlayerOne).
 enum KeyConfigPatcher {
     static func apply(root: URL) {
         let dir = root.appendingPathComponent("DATA/SaveData")
@@ -23,6 +23,47 @@ enum KeyConfigPatcher {
             }
             try? data.write(to: url)
         }
+    }
+
+    /// Writes player 1's game keys (the launcher's 컨트롤 설정) into DATA/SaveData/KeyConfig.v4, so the game listens to the same keys the touch pad and
+    /// gamepad send. File layout: UInt32 version (0), then 3 players x 108 bytes = 9 input types + 9 device indexes + 9 scan codes (UInt32 each, little endian).
+    /// A missing file is created with only player 1 assigned; an existing file only gets player 1's block changed (a .before-p1.bak copy is kept once).
+    static func applyPlayerOne(root: URL, controls: GameControls) {
+        let fileSize = 328, playerSize = 108
+        let dir = root.appendingPathComponent("DATA/SaveData")
+        let url = dir.appendingPathComponent("KeyConfig.v4")
+        let fm = FileManager.default
+        let existed = fm.fileExists(atPath: url.path)
+        let original: Data
+        if existed {
+            guard let d = try? Data(contentsOf: url), d.count == fileSize else { return }   // unknown format: leave the player's file alone
+            original = d
+        } else {
+            original = Data(count: fileSize)
+        }
+        guard original.prefix(4).allSatisfy({ $0 == 0 }) else { return }
+        var data = original
+        func put(_ offset: Int, _ value: UInt32) {
+            for i in 0..<4 { data[offset + i] = UInt8((value >> (8 * UInt32(i))) & 0xFF) }
+        }
+        let players = existed ? 1 : 3        // from scratch: the other two keyboards stay unassigned
+        for player in 0..<players {
+            let base = 4 + player * playerSize
+            for action in PadAction.allCases {
+                let field = action.rawValue * 4
+                put(base + field, 1)                                                    // input type: keyboard
+                put(base + 36 + field, 0)                                               // device index
+                put(base + 72 + field, player == 0 ? UInt32(controls.scan(action)) : 0)  // scan code
+            }
+        }
+        if existed && data == original { return }
+        if existed {
+            let bak = url.appendingPathExtension("before-p1.bak")
+            if !fm.fileExists(atPath: bak.path) { try? original.write(to: bak) }
+        } else {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        try? data.write(to: url, options: .atomic)
     }
 }
 

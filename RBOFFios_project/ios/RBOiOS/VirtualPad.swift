@@ -2,7 +2,8 @@ import SwiftUI
 import UIKit
 
 /// On-screen D-pad + action buttons + PAUSE button.
-/// D-pad -> arrow keys (8 directions), A/S/D/F -> 약 공격 / 강 공격 / 방어 / 특수, PAUSE image -> "1" (Pause).
+/// D-pad -> the 4 move keys (8 directions), the 4 round buttons -> 약 공격 / 강 공격 / 방어 / 특수, PAUSE image -> Pause.
+/// Which key each one sends comes from GameControls (the launcher's 컨트롤 설정); the defaults are the arrows, A/S/D/F and "1".
 struct VirtualPad: View {
     // D-pad frame as fractions of the screen (x, y, width, height); the pad is drawn as the largest square that fits.
     private let dpadFrame = CGRect(x: 0.055, y: 0.560, width: 0.190, height: 0.315)
@@ -12,10 +13,10 @@ struct VirtualPad: View {
     init(gameAspect: CGFloat = 4.0 / 3.0) { self.gameAspect = gameAspect }
     // Round buttons, laid out in a diamond. Units: fractions of the screen height, relative to the cluster centre.
     private let buttons: [(label: String, key: Int32, dx: CGFloat, dy: CGFloat)] = [
-        (tr("특수"),   DIK.f,  0.0,    -0.130),   // top
-        (tr("방어"),   DIK.d, -0.1075,  0.0),     // left
-        (tr("강 공격"), DIK.s,  0.1075,  0.0),     // right
-        (tr("약 공격"), DIK.a,  0.0,     0.130),   // bottom
+        (tr("특수"),   GameControls.shared.scan(.special),  0.0,    -0.130),   // top
+        (tr("방어"),   GameControls.shared.scan(.guardBtn), -0.1075,  0.0),     // left
+        (tr("강 공격"), GameControls.shared.scan(.strong),  0.1075,  0.0),     // right
+        (tr("약 공격"), GameControls.shared.scan(.weak),  0.0,     0.130),   // bottom
     ]
     private let buttonDiameter: CGFloat = 0.135   // of screen height
     private let clusterCentreY: CGFloat = 0.70    // of screen height
@@ -58,7 +59,7 @@ struct VirtualPad: View {
                         .frame(width: btnD + 2 * hitExtra, height: btnD + 2 * hitExtra)
                         .position(x: clusterCX + b.dx * h * k * spread, y: (clusterCentreY + down) * h + b.dy * h * k * spread)
                 }
-                PauseButton(key: DIK.one)
+                PauseButton(key: GameControls.shared.scan(.pause))
                     .frame(width: pauseWidth * h * ui)
                     .position(x: clusterCX, y: pauseTopMargin * h + ((pauseWidth * h * ui - 20) * 0.392 + 20) / 2)   // top right, above the button cluster
                 // 치트 버튼: PAUSE 바로 아래, 같은 크기(그림 비율도 같음)
