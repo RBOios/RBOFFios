@@ -5,7 +5,8 @@
 폴더 지정후 exe파일은 대소문자를 구분합니다.
 
 - 반드시 이름을 RBO_Ex3.exe로 해주시길 바랍니다.
+- RBO_Ex3_Config.exe 키 설정은 방향키와 A,S,D,F,1로 고정해주시길 바랍니다.
 
-<img width="400" height="185" alt="1" src="https://github.com/user-attachments/assets/fd4a33cc-0edb-4ccb-baba-04a0b20ea43b" />
+<img width="400" height="185" alt="1" src="https://github.com/user-attachments/assets/8aa087d4-8e7d-423c-9e73-2d3cf74d4096" />
 <br>
-<img width="400" height="185" alt="2" src="https://github.com/user-attachments/assets/d11f2702-5b00-4188-9acd-6f2ce0c3d849" />
+<img width="400" height="185" alt="2" src="https://github.com/user-attachments/assets/58e3fb97-a26b-4ce9-b4b1-5e895702f9d9" />
