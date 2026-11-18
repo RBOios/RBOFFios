@@ -4,6 +4,7 @@ struct LauncherView: View {
     @AppStorage("gameFolderBookmark") private var bookmark: Data = Data()
     @State private var folderName: String = ""
     @State private var showPicker = false
+    @State private var showControls = false    // 컨트롤 설정 화면
     @State private var running: Edition? = nil
     @State private var gameURL: URL? = nil
     @State private var message: String = ""
@@ -37,6 +38,7 @@ struct LauncherView: View {
         .fileImporter(isPresented: $showPicker, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result { saveBookmark(url) }
         }
+        .fullScreenCover(isPresented: $showControls) { ControlsView() }
         .onAppear { restoreName(); if running == nil { BGM.play() } }
         .onChange(of: running) { r in if r == nil { BGM.play() } else { BGM.stop() } }
     }
@@ -57,6 +59,7 @@ struct LauncherView: View {
                 }
                 .pickerStyle(.menu).accentColor(.cyan).lineLimit(1).fixedSize()   // "640x480"이 두 줄로 꺾이지 않게
             }
+            Button(tr("컨트롤 설정")) { ClickSound.play(); showControls = true }.foregroundColor(.cyan)
             Button(tr("게임 폴더 선택…")) { ClickSound.play(); showPicker = true }.foregroundColor(.cyan)
             Text(folderName.isEmpty ? tr("게임 폴더가 선택되지 않았어요 (RBO_Ex3.exe와 DATA 폴더가 있는 곳)") : trf("폴더: %@", folderName))
                 .font(.footnote).foregroundColor(.gray)
@@ -108,6 +111,7 @@ struct LauncherView: View {
             message = trf("%@ 파일을 찾지 못했어요.", ed.exeName); url.stopAccessingSecurityScopedResource(); return
         }
         KeyConfigPatcher.apply(root: url)
+        KeyConfigPatcher.applyPlayerOne(root: url, controls: GameControls.shared)   // 컨트롤 설정의 게임 키를 게임의 KeyConfig.v4에 기록
         SystemConfigPatcher.apply(root: url, size: screenSize)  // the launcher's screen-size choice; the picture is always 640x480 and the GPU scales it
         message = ""; gameURL = url; running = ed        // access stays open while the game runs
     }
