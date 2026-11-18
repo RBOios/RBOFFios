@@ -7,7 +7,6 @@ ipa 파일을 설치하고 앱을 실행합니다.
 폴던 선택에서 원본 게임을 불러옵니다.
 
 - 반드시 이름을 RBO_Ex3.exe로 해주시길 바랍니다.
-- RBO_Ex3_Config.exe를 실행하셔서 키 설정을 Up, Down, Left, Right, A,S,D,F,1로 고정해주시길 바랍니다.
 
 This is the iOS port of Ragnarok Battle Offline
 
@@ -19,7 +18,6 @@ Import the original game from the folder
 After specifying the folder, the exe file is case-sensitive.
 
 - Please be sure to name it RBO_Ex3.exe.
-- Run RBO_Ex3_Config.exe and fix the key settings to Up, Down, Left, Right, A, S, D, F, and 1.
 
 <img src="https://github.com/user-attachments/assets/480fc5d6-5660-4c2c-abb1-edd46a98aeb2" width="500" />
 <br>
