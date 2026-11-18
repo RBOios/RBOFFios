@@ -7,6 +7,15 @@
 - 반드시 이름을 RBO_Ex3.exe로 해주시길 바랍니다.
 - RBO_Ex3_Config.exe를 실행하셔서 키 설정을 Up, Down, Left, Right, A,S,D,F,1로 고정해주시길 바랍니다.
 
+This is the iOS port of Ragnarok Battle Offline
+
+The original game is not provided.
+
+After specifying the folder, the exe file is case-sensitive.
+
+- Please be sure to name it RBO_Ex3.exe.
+- Run RBO_Ex3_Config.exe and fix the key settings to Up, Down, Left, Right, A, S, D, F, and 1.
+
 <img src="https://github.com/user-attachments/assets/0027964d-a3bb-422b-8e2c-4cd6b230449c" width="500" />
 <br>
 <img src="https://github.com/user-attachments/assets/e4fadcb9-2cb7-495d-8961-7f107b00123f" width="500" />
