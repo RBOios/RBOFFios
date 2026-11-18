@@ -3,6 +3,8 @@
 원본 게임은 제공하지 않습니다.
 
 폴더 지정후 exe파일은 대소문자를 구분합니다.
+ipa 파일을 설치하고 앱을 실행합니다.
+폴던 선택에서 원본 게임을 불러옵니다.
 
 - 반드시 이름을 RBO_Ex3.exe로 해주시길 바랍니다.
 - RBO_Ex3_Config.exe를 실행하셔서 키 설정을 Up, Down, Left, Right, A,S,D,F,1로 고정해주시길 바랍니다.
@@ -10,6 +12,9 @@
 This is the iOS port of Ragnarok Battle Offline
 
 The original game is not provided.
+
+Install the IPA file, then run it
+Import the original game from the folder
 
 After specifying the folder, the exe file is case-sensitive.
 
