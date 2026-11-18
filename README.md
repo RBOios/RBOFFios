@@ -21,6 +21,6 @@ After specifying the folder, the exe file is case-sensitive.
 - Please be sure to name it RBO_Ex3.exe.
 - Run RBO_Ex3_Config.exe and fix the key settings to Up, Down, Left, Right, A, S, D, F, and 1.
 
-<img src="https://github.com/user-attachments/assets/0027964d-a3bb-422b-8e2c-4cd6b230449c" width="500" />
+<img src="https://github.com/user-attachments/assets/480fc5d6-5660-4c2c-abb1-edd46a98aeb2" width="500" />
 <br>
 <img src="https://github.com/user-attachments/assets/e4fadcb9-2cb7-495d-8961-7f107b00123f" width="500" />
