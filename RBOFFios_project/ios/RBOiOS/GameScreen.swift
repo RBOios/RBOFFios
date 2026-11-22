@@ -76,14 +76,14 @@ struct GameScreen: View {
     var body: some View {
         ZStack {
             if let host = host { MetalGameView(host: host).ignoresSafeArea() }
-            if !pad.controllerConnected { VirtualPad(gameAspect: CGFloat(screenSize.aspect)) }   // hidden while a Bluetooth/MFi gamepad is connected
+            // 패드가 연결되면 D-pad/버튼/PAUSE 만 숨기고, 치트 버튼·패널은 계속 보임 (VirtualPad 안에서 처리)
+            VirtualPad(gameAspect: CGFloat(screenSize.aspect), controllerConnected: pad.controllerConnected)
             if host != nil {   // 왼쪽 위: 음량 아이콘, 그 아래에 SAVE / LOAD (음량 슬라이더가 펼쳐지면 같이 아래로 밀림)
                 VStack {
                     HStack {
                         VStack(alignment: .leading, spacing: 10) {
-                            // 블루투스 패드가 연결되면 음량 아이콘만 숨김 (저장된 음량은 숨겨진 동안에도 그대로 적용됨)
+                            // 음량 아이콘은 블루투스 패드를 연결해도 계속 보임
                             VolumeControl()
-                                .opacity(pad.controllerConnected ? 0 : 1).allowsHitTesting(!pad.controllerConnected)
                             // 퀵 저장 / 불러오기 (슬롯 1개). 게임패드를 연결해도 계속 보임
                             if !finished { QuickStateBar() }
                         }

@@ -266,7 +266,12 @@ struct VirtualPad: View {
     private let gameAspect: CGFloat
     @State private var showCheat = false    // 치트 패널(PC 트레이너 기능)이 열려 있는지
     @StateObject private var touch = PadTouchController()
-    init(gameAspect: CGFloat = 4.0 / 3.0) { self.gameAspect = gameAspect }
+    // 블루투스/MFi 패드가 연결되면 true: D-pad / 4개 버튼 / PAUSE 는 숨기고, 치트 버튼과 패널은 그대로 둔다 (터치로 써야 하므로)
+    private let controllerConnected: Bool
+    init(gameAspect: CGFloat = 4.0 / 3.0, controllerConnected: Bool = false) {
+        self.gameAspect = gameAspect
+        self.controllerConnected = controllerConnected
+    }
     // Round buttons, laid out in a diamond. Units: fractions of the screen height, relative to the cluster centre.
     // 순서는 PadTouchController.actions (특수, 방어, 강 공격, 약 공격) 와 같아야 함
     private let buttons: [(label: String, dx: CGFloat, dy: CGFloat)] = [
@@ -313,6 +318,7 @@ struct VirtualPad: View {
             }
             let layout = PadLayout(dpadCenter: dpadCentre, dpadSize: dpadSize, buttonCenters: centres, buttonSpacing: nearest)
             ZStack {
+                if !controllerConnected {
                 // 맨 아래: 멀티터치 레이어 (D-pad / 버튼 터치를 전부 여기서 처리)
                 PadTouchLayer(layout: layout, controller: touch)
                     .frame(width: w, height: h)
@@ -329,6 +335,7 @@ struct VirtualPad: View {
                 PauseButton(key: GameControls.shared.scan(.pause))
                     .frame(width: pauseWidth * h * ui)
                     .position(x: clusterCX, y: pauseTopMargin * h + ((pauseWidth * h * ui - 20) * 0.392 + 20) / 2)   // top right, above the button cluster
+                }   // !controllerConnected
                 // 치트 버튼: PAUSE 바로 아래, 같은 크기(그림 비율도 같음)
                 let pauseW = pauseWidth * h * ui
                 let pauseH = (pauseW - 20) * 0.392 + 20
@@ -345,6 +352,9 @@ struct VirtualPad: View {
             }
             .frame(width: w, height: h)
             .onDisappear { touch.releaseAll() }
+            .onChange(of: controllerConnected) { connected in
+                if connected { touch.releaseAll() }   // 눌려 있던 터치 키가 남지 않도록
+            }
         }
         .ignoresSafeArea()
     }
