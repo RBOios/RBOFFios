@@ -206,13 +206,18 @@ static int cheat_ok(void){ return gmem&&g_code_lo==0x401000u&&g_code_hi==0x48600
 static int32_t cheat_clamp(int64_t v){ return v<0?0:(v>999999999?999999999:(int32_t)v); }
 int rbo_cheat_get(int id){ if(id<0||id>=6||!cheat_ok()) return -1; return (int)*(volatile uint32_t*)(gmem+cheat_addr[id]); }
 int rbo_cheat_frozen_mask(void){ return cheat_mask; }
-/* Character info for the quick-save slot list (level / job / sex). The guest addresses of these three values are not filled in yet, so this
-   reports "unknown" (-1) and the slot list simply shows no level/portrait. To enable it, put the RBO_Ex3.exe addresses below and read them like
-   rbo_cheat_get does. */
+/* Character info for the quick-save slot list (level / job / sex) of player 1 (RBO_Ex3.exe only).
+   The game keeps its characters in an array of 0x660-byte records at 0x25109C8 (3 party slots). In a record: +0 = job*2 + sex (-1 = empty slot;
+   order novice, swordman, archer, magician, merchant, acolyte, thief, each male then female, like the game's portrait table), +0x18 = level.
+   The outputs use the numbering of SlotPicker.swift (JobInfo): job = index of the first-class job in its list, sex 0 = female / 1 = male. */
 int rbo_player_info(int *level,int *job,int *sex){
-    if(!cheat_ok()) return -1;
-    (void)level; (void)job; (void)sex;
-    return -1;
+    if(!level||!job||!sex||!cheat_ok()) return -1;
+    static const int base_job[7]={0,2,5,9,12,15,18};          /* novice, swordman, archer, magician, merchant, acolyte, thief */
+    int32_t v =(int32_t)*(volatile uint32_t*)(gmem+0x25109C8u);
+    int32_t lv=(int32_t)*(volatile uint32_t*)(gmem+0x25109C8u+0x18u);
+    if(v<0||v>=14||lv<1||lv>999) return -1;
+    *level=lv; *job=base_job[v>>1]; *sex=(v&1)?0:1;
+    return 0;
 }
 static void cheat_push(int op,int id,int val){
     if(id<0||id>=6||!cheat_ok()) return;
