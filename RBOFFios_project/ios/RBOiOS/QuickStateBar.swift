@@ -110,6 +110,10 @@ struct QuickStateBar: View {
         if r == 1 { return }
         working = false
         if lastOp == 1 && r == 2 { SlotStore.writeMeta(workSlot, workMeta) }      // 저장에 성공하면 날짜 옆에 보여 줄 레벨/직업을 슬롯 메모로 적음
+        // 레벨/직업 메모가 없던 예전 저장을 불러온 경우: 방금 불러와서 게임에 올라온 캐릭터 정보로 메모를 채워 둠 (다음부터 슬롯에 그림이 보임)
+        if lastOp == 2 && r == 3 && !FileManager.default.fileExists(atPath: SlotStore.metaURL(workSlot).path), let p = SlotStore.currentPlayer() {
+            SlotStore.writeMeta(workSlot, p)
+        }
         show(Self.resultText(op: lastOp, code: r))
     }
 
