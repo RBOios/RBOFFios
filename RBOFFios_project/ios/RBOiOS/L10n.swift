@@ -19,6 +19,20 @@ func trf(_ ko: String, _ args: CVarArg...) -> String { String(format: tr(ko), ar
 
 enum L10n {
     static let en: [String: String] = [
+        // quick save slots
+        "슬롯 %d": "Slot %d",
+        "날짜": "Date",
+        "시간": "Time",
+        "레벨": "Level",
+        "저장할 슬롯": "Save to slot",
+        "불러올 슬롯": "Load from slot",
+        "이 슬롯에 덮어쓸까요?": "Overwrite this slot?",
+        "덮어쓰기": "Overwrite",
+        "슬롯 %d에 저장된 내용은 사라져요.": "What is saved in slot %d will be lost.",
+        "슬롯 %d: %@에 저장한 상태예요.\n지금 진행 중인 내용은 사라져요.": "Slot %d: saved on %@.\nYour current progress will be lost.",
+        "노비스": "Novice", "슈퍼노비스": "Super Novice", "소드맨": "Swordman", "나이트": "Knight", "크루세이더": "Crusader", "아처": "Archer", "헌터": "Hunter",
+        "바드": "Bard", "댄서": "Dancer", "매지션": "Magician", "위자드": "Wizard", "세이지": "Sage", "머천트": "Merchant", "블랙스미스": "Blacksmith",
+        "알케미스트": "Alchemist", "어콜라이트": "Acolyte", "프리스트": "Priest", "몽크": "Monk", "씨프": "Thief", "어쌔신": "Assassin", "로그": "Rogue",
         // launcher
         "확장팩 3": "Expansion 3",
         "%@ 시작하기": "Start %@",

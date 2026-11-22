@@ -49,6 +49,7 @@ struct GameScreen: View {
     @StateObject private var pad = PadInput()   // physical gamepad; also tells us when to hide the touch pad
     // Performance readout (top-left): frames shown per second and average ms spent converting/handing over each frame.
     private let showOverlay = false   // 화면 왼쪽 위 성능 표시. true로 바꾸면 다시 보임 (rbo_perf.txt 기록은 이 값과 상관없이 계속됨)
+    @ObservedObject private var slotUI = SlotUI.shared
     @State private var statsText = ""
     @State private var profText = ""
     @State private var logHandle: FileHandle? = nil
@@ -106,6 +107,7 @@ struct GameScreen: View {
                     Spacer()
                 }.padding(8).allowsHitTesting(false)
             }
+            if let m = slotUI.mode { SlotPickerView(mode: m) }       // 저장/불러오기 슬롯 선택 화면
             if finished {
                 VStack(spacing: 12) {
                     Text(tr("게임이 종료되었어요")).foregroundColor(.white)

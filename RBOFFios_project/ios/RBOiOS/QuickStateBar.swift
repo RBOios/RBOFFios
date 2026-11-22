@@ -2,24 +2,25 @@ import SwiftUI
 
 /// 화면 왼쪽 위(음량 아이콘 오른쪽)의 "저장 / 불러오기" 버튼 (슬롯 1개, 세로로 저장 → 불러오기, 흰색 아이콘).
 /// 엔진이 게임 전체 상태(메모리·CPU·사운드·화면)를 파일 하나로 저장했다가 그대로 되돌립니다.
-/// 파일: Files 앱 > RBO 폴더의 rbo_quicksave1.state
+/// 슬롯 2개: 저장/불러오기를 누르면 슬롯 선택 화면(SlotPicker.swift)이 나옵니다.
+/// 파일: Files 앱 > RBO 폴더의 rbo_quicksave1.state, rbo_quicksave2.state (+ 레벨/직업 메모 rbo_quicksaveN.meta.json)
 struct QuickStateBar: View {
     @State private var message: String? = nil
     @State private var working = false
     @State private var askLoad = false
     @State private var loadInfo = ""
     @State private var lastOp: Int32 = 0          // 1 = save, 2 = load: tells which table the result code belongs to
+    @State private var askOverwrite = false       // 이미 저장된 슬롯에 덮어쓸지 묻는 창
+    @State private var pendingSlot = 1            // 확인 창이 떠 있는 슬롯
+    @State private var workSlot = 1               // 지금 저장/불러오는 중인 슬롯
+    @State private var workMeta: (level: Int, job: Int, sex: Int)? = nil   // 저장 요청 때 읽어 둔 캐릭터 정보 (저장에 성공하면 슬롯 메모로 적음)
     private let poll = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
-
-    private static var fileURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("rbo_quicksave1.state")
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 6) {   // 저장 아래에 불러오기
-                iconButton("SaveIcon") { start(1) }
-                iconButton("LoadIcon") { prepareLoad() }
+                iconButton("SaveIcon") { SlotUI.shared.mode = .save }
+                iconButton("LoadIcon") { SlotUI.shared.mode = .load }
             }
             if let m = message {
                 Text(m).font(.system(size: 13, weight: .semibold)).foregroundColor(Color.white)
@@ -30,10 +31,17 @@ struct QuickStateBar: View {
         }
         .alert(tr("저장한 게임을 불러올까요?"), isPresented: $askLoad) {
             Button(tr("취소"), role: .cancel) {}
-            Button(tr("불러오기"), role: .destructive) { start(2) }
+            Button(tr("불러오기"), role: .destructive) { start(2, slot: pendingSlot) }
         } message: {
             Text(loadInfo)
         }
+        .background(Color.clear.alert(tr("이 슬롯에 덮어쓸까요?"), isPresented: $askOverwrite) {
+            Button(tr("취소"), role: .cancel) {}
+            Button(tr("덮어쓰기"), role: .destructive) { start(1, slot: pendingSlot) }
+        } message: {
+            Text(trf("슬롯 %d에 저장된 내용은 사라져요.", pendingSlot))
+        })
+        .onAppear { SlotUI.shared.pick = { mode, slot in handlePick(mode, slot) } }
         .onReceive(poll) { _ in check() }
     }
 
@@ -67,18 +75,32 @@ struct QuickStateBar: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { if message == text { message = nil } }
     }
 
-    private func start(_ op: Int32) {
-        if rbo_state_request(op, Self.fileURL.path) == 0 { working = true; lastOp = op; message = op == 1 ? tr("저장 중…") : tr("불러오는 중…") }
-        else { show(tr("잠시 후 다시 시도해 주세요")) }
+    /// 슬롯 선택 화면에서 슬롯을 눌렀을 때.
+    private func handlePick(_ mode: SlotMode, _ slot: Int) {
+        SlotUI.shared.mode = nil
+        pendingSlot = slot
+        switch mode {
+        case .save:
+            if SlotStore.info(slot) != nil { askOverwrite = true } else { start(1, slot: slot) }
+        case .load:
+            prepareLoad(slot)
+        }
     }
 
-    private func prepareLoad() {
-        var t: Int64 = 0; var f: Int32 = 0
-        guard rbo_state_info(Self.fileURL.path, &t, &f) == 0 else { show(tr("저장된 게임이 없어요")); return }
+    private func start(_ op: Int32, slot: Int) {
+        let meta = op == 1 ? SlotStore.currentPlayer() : nil          // 저장하는 순간의 캐릭터 정보
+        if rbo_state_request(op, SlotStore.stateURL(slot).path) == 0 {
+            working = true; lastOp = op; workSlot = slot; workMeta = meta
+            message = op == 1 ? tr("저장 중…") : tr("불러오는 중…")
+        } else { show(tr("잠시 후 다시 시도해 주세요")) }
+    }
+
+    private func prepareLoad(_ slot: Int) {
+        guard let info = SlotStore.info(slot) else { show(tr("저장된 게임이 없어요")); return }
         let fmt = DateFormatter()
         if AppLang.current == .ko { fmt.locale = Locale(identifier: "ko_KR"); fmt.dateFormat = "M월 d일 a h:mm" }
         else { fmt.locale = Locale(identifier: "en_US"); fmt.dateFormat = "MMM d, h:mm a" }
-        loadInfo = trf("%@에 저장한 상태예요.\n지금 진행 중인 내용은 사라져요.", fmt.string(from: Date(timeIntervalSince1970: TimeInterval(t))))
+        loadInfo = trf("슬롯 %d: %@에 저장한 상태예요.\n지금 진행 중인 내용은 사라져요.", slot, fmt.string(from: info.date))
         askLoad = true
     }
 
@@ -87,6 +109,7 @@ struct QuickStateBar: View {
         let r = rbo_state_result()
         if r == 1 { return }
         working = false
+        if lastOp == 1 && r == 2 { SlotStore.writeMeta(workSlot, workMeta) }      // 저장에 성공하면 날짜 옆에 보여 줄 레벨/직업을 슬롯 메모로 적음
         show(Self.resultText(op: lastOp, code: r))
     }
 
