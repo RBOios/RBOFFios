@@ -94,6 +94,7 @@ private struct Outlined: ViewModifier {
 private extension View { func outlined() -> some View { modifier(Outlined()) } }
 
 struct SlotPanel: View {
+    private let panelOpacity = 0.6                      // 슬롯 판의 투명도 (0.96이었음). 더 비치게 하려면 낮추고, 진하게 하려면 올리세요
     let slot: Int
     let info: SlotInfo?
     let enabled: Bool
@@ -112,8 +113,11 @@ struct SlotPanel: View {
             let w = g.size.width, h = g.size.height
             let fs = h * 0.115
             ZStack(alignment: .topLeading) {
-                SlotPanelShape().fill(Color(white: 0.31).opacity(0.96))
-                SlotPanelShape().stroke(Color(white: 0.31).opacity(0.96), style: StrokeStyle(lineWidth: 6, lineJoin: .round))
+                // 판 + 둥근 테두리를 한 덩어리로 합쳐서 투명도를 줌 (따로 주면 겹치는 가장자리만 진하게 보임). 투명도는 panelOpacity 값 (1 = 불투명)
+                ZStack {
+                    SlotPanelShape().fill(Color(white: 0.31))
+                    SlotPanelShape().stroke(Color(white: 0.31), style: StrokeStyle(lineWidth: 6, lineJoin: .round))
+                }.compositingGroup().opacity(panelOpacity)
                 if let i = info {
                     if let job = i.job, let name = JobInfo.portrait(job: job, sex: i.sex ?? 0) {
                         Image(name).resizable().scaledToFit()
