@@ -115,13 +115,13 @@ struct SlotPanel: View {
             let fs = h * 0.115
             ZStack(alignment: .topLeading) {
                 // 판 + 둥근 테두리를 한 덩어리로 합쳐서 투명도를 줌 (따로 주면 겹치는 가장자리만 진하게 보임). 투명도는 panelOpacity 값 (1 = 불투명)
-                // 판 바깥쪽 검은 테두리 (두께 borderWidth). 판 모양 바깥 고리 부분만 칠하려고 판 자리를 뚫어서(destinationOut) 만듦 -> 반투명한 판 뒤로 검정이 비치지 않음
+                // 판 바깥쪽 흰 테두리 (두께 borderWidth). 판 모양 바깥 고리 부분만 칠하려고 판 자리를 뚫어서(destinationOut) 만듦 -> 반투명한 판 뒤로 검정이 비치지 않음
                 ZStack {
-                    SlotPanelShape().fill(Color.black)
-                    SlotPanelShape().stroke(Color.black, style: StrokeStyle(lineWidth: 6 + borderWidth * 2, lineJoin: .round))
+                    SlotPanelShape().fill(Color.white)
+                    SlotPanelShape().stroke(Color.white, style: StrokeStyle(lineWidth: 6 + borderWidth * 2, lineJoin: .round))
                     ZStack {
-                        SlotPanelShape().fill(Color.black)
-                        SlotPanelShape().stroke(Color.black, style: StrokeStyle(lineWidth: 6, lineJoin: .round))
+                        SlotPanelShape().fill(Color.white)
+                        SlotPanelShape().stroke(Color.white, style: StrokeStyle(lineWidth: 6, lineJoin: .round))
                     }.blendMode(.destinationOut)
                 }.compositingGroup()
                 ZStack {
