@@ -51,6 +51,8 @@ int  rbo_state_result(void);
 const char *rbo_state_message(void);
 /* Header of a saved file: unix time and frame counter. Returns 0 if the file exists and is a state file. */
 int  rbo_state_info(const char *path, int64_t *unix_time, int *frames);
+/* Level / job / sex of the current character (for the slot list). Returns 0 on success, <0 if it cannot be read (then the outputs are untouched). */
+int  rbo_player_info(int *level, int *job, int *sex);
 #ifdef __cplusplus
 }
 #endif

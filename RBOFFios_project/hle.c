@@ -206,6 +206,14 @@ static int cheat_ok(void){ return gmem&&g_code_lo==0x401000u&&g_code_hi==0x48600
 static int32_t cheat_clamp(int64_t v){ return v<0?0:(v>999999999?999999999:(int32_t)v); }
 int rbo_cheat_get(int id){ if(id<0||id>=6||!cheat_ok()) return -1; return (int)*(volatile uint32_t*)(gmem+cheat_addr[id]); }
 int rbo_cheat_frozen_mask(void){ return cheat_mask; }
+/* Character info for the quick-save slot list (level / job / sex). The guest addresses of these three values are not filled in yet, so this
+   reports "unknown" (-1) and the slot list simply shows no level/portrait. To enable it, put the RBO_Ex3.exe addresses below and read them like
+   rbo_cheat_get does. */
+int rbo_player_info(int *level,int *job,int *sex){
+    if(!cheat_ok()) return -1;
+    (void)level; (void)job; (void)sex;
+    return -1;
+}
 static void cheat_push(int op,int id,int val){
     if(id<0||id>=6||!cheat_ok()) return;
     unsigned h=cq_h; if(h-cq_t>=32) return;               /* queue full: drop (the UI cannot produce requests that fast) */
